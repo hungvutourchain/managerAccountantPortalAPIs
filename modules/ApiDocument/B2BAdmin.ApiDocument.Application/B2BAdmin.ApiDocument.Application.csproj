@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net7.0</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\B2BAdmin.ApiDocument.Infrastructure\B2BAdmin.ApiDocument.Infrastructure.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" Version="9.2.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="Queries\Document\Menu\" />
+    <Folder Include="Request\" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Remove="Queries\Document\" />
+    <None Remove="Queries\Document\Menu\" />
+    <None Remove="Queries\Document\Config\" />
+    <None Remove="Queries\Document\Tour\" />
+    <None Remove="Queries\Document\Hotel\" />
+    <None Remove="Request\" />
+    <None Remove="Queries\Document\RetailSalesSic\" />
+  </ItemGroup>
+</Project>

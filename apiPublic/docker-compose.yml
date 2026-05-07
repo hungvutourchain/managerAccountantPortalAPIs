@@ -1,0 +1,16 @@
+version: '3.4'
+
+services:
+  pluginapi:
+    image: ${DOCKER_REGISTRY-}pluginapi
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    ports:
+      - "44501:443"
+      - "44601:80"
+
+networks:
+  default:
+    external:
+      name: tourchainnet

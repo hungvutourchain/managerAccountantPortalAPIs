@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net7.0</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\B2BAdmin.ApiDocument.Domains\B2BAdmin.ApiDocument.Domains.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="CloudKit.Infrastructure.Data" Version="2.4.0" />
+    <PackageReference Include="MongoDB.Driver" Version="2.22.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="6.0.5" />
+  </ItemGroup>
+</Project>

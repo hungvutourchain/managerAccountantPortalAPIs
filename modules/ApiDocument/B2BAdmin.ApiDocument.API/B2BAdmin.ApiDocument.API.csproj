@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net7.0</TargetFramework>
+    <LangVersion>8.0</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\B2BAdmin.ApiDocument.Application\B2BAdmin.ApiDocument.Application.csproj" />
+    <ProjectReference Include="..\B2BAdmin.ApiDocument.Infrastructure\B2BAdmin.ApiDocument.Infrastructure.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Core" Version="2.2.5" />
+    <PackageReference Include="FluentValidation.DependencyInjectionExtensions" Version="9.2.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc" Version="2.2.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="Controllers\" />
+    <Folder Include="Controllers\admin\" />
+    <Folder Include="Helpers\" />
+    <Folder Include="Services\" />
+    <Folder Include="Controllers\Client\" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Remove="Controllers\admin\" />
+    <None Remove="Helpers\" />
+    <None Remove="Services\" />
+    <None Remove="Controllers\Client\" />
+    <None Remove="Controllers\Client\Tours\" />
+    <None Remove="Controllers\Client\Hotels\" />
+  </ItemGroup>
+</Project>
