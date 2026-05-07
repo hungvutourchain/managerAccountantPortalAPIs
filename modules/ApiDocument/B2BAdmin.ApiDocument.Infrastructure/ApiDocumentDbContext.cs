@@ -49,7 +49,7 @@ namespace B2BAdmin.ApiDocument.Infrastructure
         public MongoDB.Driver.IMongoCollection<DocumentContent> DocumentContents { get { return _database.GetCollection<DocumentContent>("api_document_contents"); } }
         public MongoDB.Driver.IMongoCollection<DocumentMenuchildren> Api_document_menus_view_clients { get { return _database.GetCollection<DocumentMenuchildren>("api_document_menus_view_client"); } }
         public MongoDB.Driver.IMongoCollection<GentOnlineObject> GentOnlines { get { return _database.GetCollection<GentOnlineObject>("gents_onlines"); } }
-        public MongoDB.Driver.IMongoCollection<UserAdmin> AdminUsers { get { return _database.GetCollection<UserAdmin>("api_document_user"); } }
+        public MongoDB.Driver.IMongoCollection<UserAdmin> AdminUsers { get { return _database.GetCollection<UserAdmin>("users"); } }
         public MongoDB.Driver.IMongoCollection<ProCodes> ProCodes { get { return _database.GetCollection<ProCodes>("procodes"); } }
         public MongoDB.Driver.IMongoCollection<lsNation> Countries { get { return _database.GetCollection<lsNation>("countries"); } }
 
