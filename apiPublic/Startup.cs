@@ -59,8 +59,6 @@ namespace ApiPlugin
                          .AllowCredentials();
                  });
              });
-            //  for all 
-            services.AddCors();
 
             services.AddSignalR();
             services.AddValidatorsFromAssemblyContaining(typeof(AuthenticateApiDocumentCommand), ServiceLifetime.Transient);
@@ -72,8 +70,6 @@ namespace ApiPlugin
                     .WithTransientLifetime()
             );
             services.AddValidatorsFromAssemblyContaining(typeof(Startup), ServiceLifetime.Transient);
-            services.AddHealthChecks();
-            services.AddCors();
             services.AddScoped<IUserServiceDocument, UserServiceDocument>();
             services.AddHttpClient();
             services.AddHttpContextAccessor();
@@ -143,13 +139,6 @@ namespace ApiPlugin
             // app.UseHttpsRedirection();
 
             app.UseCors("AllowAllOriginsPolicy");
-
-              // global cors policy
-            app.UseCors(x => x
-                .AllowAnyMethod()
-                .AllowAnyHeader()
-                .SetIsOriginAllowed(origin => true) // allow any origin
-                .AllowCredentials()); // allow credentials
 
             app.UseRouting();
             app.UseWebSockets();

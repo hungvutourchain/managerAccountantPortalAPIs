@@ -38,11 +38,11 @@ namespace B2BAdmin.ApiDocument.Services
                     return null;
                 var passMD5 = MD5Hash(request.Password);
                 var UserAdmin = await _apiDocumentDbContext.AdminUsers.Find(x => x.Username == request.Username && x.Password == passMD5).FirstOrDefaultAsync();
-                var user = UserAdmin.Adapt<UserAdminTourchain>();
+                var user = UserAdmin.Adapt<UserAdmin>();
                 // return null if user not found
                 if (user == null) return new AuthenticateResponseDocument
                 (
-                    new UserAdminTourchain
+                    new UserAdmin
                     {
                         Id = null,
 
@@ -58,7 +58,7 @@ namespace B2BAdmin.ApiDocument.Services
             }
             
         }
-        public string generateJwtToken(UserAdminTourchain user)
+        public string generateJwtToken(UserAdmin user)
         {
             // generate token that is valid for 7 days
             var tokenHandler = new JwtSecurityTokenHandler();

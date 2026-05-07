@@ -66,10 +66,14 @@ namespace ApiPlugin
                  })
                 .ConfigureWebHostDefaults(webBuilder =>
                 {
+                    var maxRequestBodySize = builtConfig.GetValue<long?>("Kestrel:Limits:MaxRequestBodySize")
+                        ?? 30L * 1024 * 1024;
+
                     webBuilder.UseStartup<Startup>()
                     .UseKestrel(options =>
                     {
-                        options.Limits.MaxRequestBodySize = null;
+                        // Keep request size bounded to avoid untrusted large payloads exhausting memory.
+                        options.Limits.MaxRequestBodySize = maxRequestBodySize;
                     })
                     .UseSetting(WebHostDefaults.HostingStartupAssembliesKey, "B2BAdmin.ApiDocument.API");
                 });

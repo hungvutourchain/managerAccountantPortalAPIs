@@ -11,7 +11,7 @@ namespace  B2BAdmin.ApiDocument.Services
         public string? IdUser { get; set; }
         public string Token { get; set; }
         public string Mes { get; set; }
-        public AuthenticateResponseDocument(UserAdminTourchain user, string token, string mes)
+        public AuthenticateResponseDocument(UserAdmin user, string token, string mes)
         {
             IdUser = user!= null && user.Id != null ? user.Id : "";
             Token = token ?? "";

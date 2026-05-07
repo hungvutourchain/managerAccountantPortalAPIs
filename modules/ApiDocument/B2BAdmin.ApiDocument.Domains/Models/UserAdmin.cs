@@ -7,20 +7,7 @@ namespace B2BAdmin.ApiDocument.Domains.Models
 {
     [BsonIgnoreExtraElements]
     [BsonDiscriminator(Required = false)]
-    public class UserAdminTourchain : UserAdmin
-    {
-        [BsonElement("IdAgency")]
-        [JsonPropertyName("IdAgency")]
-        public string? IdAgency { get; set; }
-
-        [BsonElement("currencyRounding")]
-        [JsonPropertyName("currencyRounding")]
-        public string? CurrencyRounding { get; set; }
-
-        [BsonElement("nation")]
-        [JsonPropertyName("nation")]
-        public string? nation { get; set; }
-    }
+    
     public class UserAccess
     {
         [BsonElement("userID")]
@@ -49,7 +36,6 @@ namespace B2BAdmin.ApiDocument.Domains.Models
     [BsonDiscriminator(Required = false)]
     public class UserAdmin : MongoBaseModel
     {
-       
 
         [BsonElement("Username")]
         [JsonPropertyName("Username")]

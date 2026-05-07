@@ -66,15 +66,12 @@ namespace B2BAdmin.ApiDocument.Services
                     .Include(x => x.CurrencyRounding)
                 )
                 .FirstOrDefaultAsync();
-            var user = new UserAdminTourchain();
+            var user = new UserAdmin();
             user.Id = Data.md5code;
-            user.IdAgency = GentOnlines.Id;
-            user.nation = Data.Nation;
-            user.CurrencyRounding = configPages?.CurrencyRounding;
             // return null if user not found
             if (user == null) return new AuthenticateResponseDocument
             (
-                new UserAdminTourchain
+                new UserAdmin
                 {
                     Id = null,
                     
@@ -84,7 +81,7 @@ namespace B2BAdmin.ApiDocument.Services
             var token = generateJwtToken(user);
             return new AuthenticateResponseDocument(user, token, "");
         }
-        public string generateJwtToken(UserAdminTourchain user)
+        public string generateJwtToken(UserAdmin user)
         {
             // generate token that is valid for 7 days
             var tokenHandler = new JwtSecurityTokenHandler();
@@ -92,9 +89,7 @@ namespace B2BAdmin.ApiDocument.Services
             var tokenDescriptor = new SecurityTokenDescriptor
             {
                 Subject = new ClaimsIdentity(new[] { new Claim("Id", user.Id),
-                    new Claim("IdAgency", user.IdAgency),
-                    new Claim("CurrencyRounding", user.CurrencyRounding ?? ""),
-                     new Claim("Nation", user.nation),
+                    new Claim("Id", user.Id),
                 }),
                 Expires = DateTime.UtcNow.AddDays(7),
                 SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)

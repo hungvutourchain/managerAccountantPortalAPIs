@@ -7,7 +7,7 @@ namespace B2BAdmin.ApiDocument.Infrastructure
 
     public partial class sqlDbContext : DbContext
     {
-        public DbSet<UserAdmin> UserAdminTourchains { get; set; } = null;
+        public DbSet<UserAdmin> UserAdmins { get; set; } = null;
 
         public sqlDbContext()
         {

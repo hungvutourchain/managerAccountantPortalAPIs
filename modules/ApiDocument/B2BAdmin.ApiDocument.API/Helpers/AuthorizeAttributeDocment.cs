@@ -9,7 +9,7 @@ public class DocumentAuthorizeAttribute : Attribute, IAuthorizationFilter
 {
     public void OnAuthorization(AuthorizationFilterContext context)
     {
-        var user = (UserAdminTourchain) context.HttpContext.Items["UserAdminTourchain"];
+        var user = (UserAdmin) context.HttpContext.Items["UserAdmin"];
         
         if (user == null)
         {

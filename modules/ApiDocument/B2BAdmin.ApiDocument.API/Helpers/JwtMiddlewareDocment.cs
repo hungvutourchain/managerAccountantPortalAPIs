@@ -62,7 +62,7 @@ namespace B2BAdmin.ApiDocument.Helpers
                 var jwtToken = (JwtSecurityToken)validatedToken;
                 var userId = jwtToken.Claims.First(x => x.Type == "Id").Value.ToString();
                 var IdAgency = jwtToken.Claims.First(x => x.Type == "IdAgency").Value.ToString();
-                var User = new UserAdminTourchain();
+                var User = new UserAdmin();
                 if (!string.IsNullOrWhiteSpace(IdAgency) && IdAgency != "false")
                 {
                     User = userService.GetAgencyId(userId, IdAgency).Result;
@@ -71,7 +71,7 @@ namespace B2BAdmin.ApiDocument.Helpers
                 {
                     User = userService.GetByIdDocument(userId).Result;
                 }
-                context.Items["UserAdminTourchain"] = User;
+                context.Items["UserAdmin"] = User;
                 // attach user to context on successful jwt validation
             }
             catch (Exception ex)

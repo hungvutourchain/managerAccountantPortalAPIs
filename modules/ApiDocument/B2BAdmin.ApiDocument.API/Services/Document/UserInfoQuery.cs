@@ -9,7 +9,7 @@ using Mapster;
 
 namespace B2BAdmin.ApiDocument.Services
 {
-    public class UserInfoQuery : IRequest<UserAdminTourchain>
+    public class UserInfoQuery : IRequest<UserAdmin>
     {
         public string? Id { get; set; }
     }
@@ -21,7 +21,7 @@ namespace B2BAdmin.ApiDocument.Services
         }
     }
 
-    public class GetlistServiceSuplierCommandHandler : IRequestHandler<UserInfoQuery, UserAdminTourchain>
+    public class GetlistServiceSuplierCommandHandler : IRequestHandler<UserInfoQuery, UserAdmin>
     {
         private readonly sqlDbContext _b2bTourchainDbContext;
 
@@ -31,10 +31,10 @@ namespace B2BAdmin.ApiDocument.Services
             _b2bTourchainDbContext = dbContext;
         }
 
-        public async Task<UserAdminTourchain> Handle(UserInfoQuery request, CancellationToken cancellationToken)
+        public async Task<UserAdmin> Handle(UserInfoQuery request, CancellationToken cancellationToken)
         {
-            var UserAdmin =  await _b2bTourchainDbContext.UserAdminTourchains.FirstOrDefaultAsync(x => x.Id == request.Id);
-            return UserAdmin.Adapt<UserAdminTourchain>();
+            var UserAdmin =  await _b2bTourchainDbContext.UserAdmins.FirstOrDefaultAsync(x => x.Id == request.Id);
+            return UserAdmin.Adapt<UserAdmin>();
         }
     }
 }

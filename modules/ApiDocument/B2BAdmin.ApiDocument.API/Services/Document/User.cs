@@ -13,8 +13,8 @@ namespace B2BAdmin.ApiDocument.Services
     public interface IUserServiceDocument
     {
         //Task<AuthenticateResponse> Authenticate(AuthenticateRequest model);
-        Task<UserAdminTourchain> GetByIdDocument(string id);
-        Task<UserAdminTourchain> GetAgencyId(string id, string IdAgency);
+        Task<UserAdmin> GetByIdDocument(string id);
+        Task<UserAdmin> GetAgencyId(string id, string IdAgency);
     }
 
     public class UserServiceDocument : IUserServiceDocument
@@ -30,13 +30,13 @@ namespace B2BAdmin.ApiDocument.Services
             _apiDocumentDbContext = apiDocumentDbContext;
         }
 
-        public async Task<UserAdminTourchain> GetByIdDocument(string id)
+        public async Task<UserAdmin> GetByIdDocument(string id)
         {
             var UserAdmin = await _apiDocumentDbContext.AdminUsers.Find(x => x.Id == id).FirstOrDefaultAsync();
-            return UserAdmin.Adapt<UserAdminTourchain>();
+            return UserAdmin.Adapt<UserAdmin>();
         }
 
-        public async Task<UserAdminTourchain> GetAgencyId(string id, string IdAgency)
+        public async Task<UserAdmin> GetAgencyId(string id, string IdAgency)
         {
             var GentOnlines = await _apiDocumentDbContext.GentOnlines.Find(x => x.Id == IdAgency)
                  .Project<GentOnlineObject>(
@@ -59,9 +59,8 @@ namespace B2BAdmin.ApiDocument.Services
                     Data = Abouts.Adapt<ProCodeFilter>();
                 }
             }
-            var user = new UserAdminTourchain();
+            var user = new UserAdmin();
             user.Id = Data.md5code;
-            user.IdAgency = GentOnlines.Id;
             return user;
         }
     }
