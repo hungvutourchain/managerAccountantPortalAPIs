@@ -71,5 +71,12 @@ namespace BBCAdmin.SupplierEmail.API.Controllers
             var rs = await _mediator.Send(query);
             return Ok(rs);
         }
+
+        [HttpGet("countries")]
+        public async Task<IActionResult> GetCountriesAsync()
+        {
+            var rs = await _mediator.Send(new GetCountriesQuery());
+            return Ok(rs);
+        }
     }
 }
