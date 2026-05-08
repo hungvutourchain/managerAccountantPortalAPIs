@@ -8,21 +8,16 @@ services:
       Kestrel__EndPoints__Http__Url: http://0.0.0.0:81
       JwtSecret: 16_length_at_least
       ASPNETCORE_ENVIRONMENT: QA
-      MongoDatabaseSettings__ConnectionString: mongodb://AdminAccountantPortal:Kawa#150691vu@infrastructure_mongodb/dataTourChain
-      MongoDatabaseSettings__DatabaseName: dataTourChain
-      ConnectionStrings__sqlTourChain: "Data Source=128.199.72.245;User ID=sa;Password=Pa$sword279;Initial Catalog=TourChainSql;Connect Timeout=30;Encrypt=False;TrustServerCertificate=False;ApplicationIntent=ReadWrite;MultiSubnetFailover=False"
+      PathBase: /b2badminapi
+      MongoDatabaseSettings__ConnectionString: mongodb://AdminAccountantPortal:PssAccountantPortal@infrastructure_mongodb/AccountantPortal?authSource=admin
+      MongoDatabaseSettings__DatabaseName: AccountantPortal
+      ConnectionStrings__sqlTourChain: 'Data Source=128.199.72.245;User ID=sa;Password=Pa$$sword279;Initial Catalog=TourChainSql;Connect Timeout=30;Encrypt=False;TrustServerCertificate=False;ApplicationIntent=ReadWrite;MultiSubnetFailover=False'
       Sentry_Source: "netCoreApiAccountantPortal"
       Sentry_Environment: "Live"
       TourChainIssuer: "Terraverde"
       NotificationApiKey: "NotificationApiKeytrial"
       RedisUrl: "tourchain_redis:6379,password=Tourchain@123456,allowAdmin=true"
-      CorsOrigins__0: http://localhost:65222
-      CorsOrigins__1: https://localhost:65222
-      CorsOrigins__2: https://terraverde.tourchain.net
-      CorsOrigins__3: https://www.terraverde.tourchain.net
-      CorsOrigins__4: http://www.terraverde.tourchain.net
-      CorsOrigins__5: http://terraverde.tourchain.net
-      Bearer__Authority: https://terraverde.tourchain.net/identity
+      CorsOrigins__0: http://159.89.193.175
       Bearer__Audience: "resource_admin_api"
       Deepseek__ApiKey: "sk-ca5877640bfc4ffcbb393730af18067d"
       Deepseek__ChatEndpoint: "https://api.deepseek.com/v1/chat/completions"
