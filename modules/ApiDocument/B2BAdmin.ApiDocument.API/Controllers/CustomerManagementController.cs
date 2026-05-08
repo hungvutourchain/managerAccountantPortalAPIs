@@ -6,12 +6,13 @@ using System.Threading.Tasks;
 using B2BAdmin.ApiDocument.Domains.Models;
 using B2BAdmin.ApiDocument.Infrastructure;
 using Microsoft.AspNetCore.Mvc;
+using MongoDB.Bson;
 using MongoDB.Driver;
 using OfficeOpenXml;
 using OfficeOpenXml.Style;
 using System.Drawing;
 
-namespace ApiPlugin.Controllers
+namespace B2BAdmin.ApiDocument.API.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
@@ -61,11 +62,9 @@ namespace ApiPlugin.Controllers
                 filters.Add(filterBuilder.Eq(x => x.riskLevel, riskLevel));
             }
 
-            // Exclude soft-deleted records
+            // Exclude both current and legacy soft-delete flags.
             filters.Add(filterBuilder.Eq(x => x.isDeleted, false));
-
-            // Exclude soft-deleted customers
-            filters.Add(filterBuilder.Eq(x => x.isDeleted, false));
+            filters.Add(filterBuilder.Ne("isDelete", true));
 
             var finalFilter = filters.Count > 0 ? filterBuilder.And(filters) : filterBuilder.Empty;
 
@@ -92,7 +91,10 @@ namespace ApiPlugin.Controllers
         [HttpGet("summary")]
         public async Task<IActionResult> GetSummaryAsync()
         {
-            var filter = Builders<CustomerAccount>.Filter.Eq(x => x.isDeleted, false);
+            var filterBuilder = Builders<CustomerAccount>.Filter;
+            var filter = filterBuilder.And(
+                filterBuilder.Eq(x => x.isDeleted, false),
+                filterBuilder.Ne("isDelete", true));
             var data = await _apiDocumentDbContext.CustomerAccounts.Find(filter).ToListAsync();
 
             var totalCustomers = data.Count;
@@ -111,6 +113,68 @@ namespace ApiPlugin.Controllers
                 totalDebt,
                 totalCredit
             });
+        }
+
+        [HttpGet("account-types")]
+        public async Task<IActionResult> GetAccountTypesAsync(
+            [FromQuery] string search = null,
+            [FromQuery] bool includeAll = false,
+            [FromQuery] int maxItems = 200)
+        {
+            maxItems = maxItems < 1 ? 200 : Math.Min(maxItems, 500);
+
+            var filterBuilder = Builders<BsonDocument>.Filter;
+            var filters = new List<FilterDefinition<BsonDocument>>
+            {
+                filterBuilder.Ne("isDelete", true),
+                filterBuilder.Ne("isDeleted", true)
+            };
+
+            if (!includeAll)
+            {
+                filters.Add(filterBuilder.Regex("accountType", new BsonRegularExpression("^(131|331)", "i")));
+            }
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var keyword = search.Trim();
+                var keywordRegex = new BsonRegularExpression(keyword, "i");
+                filters.Add(filterBuilder.Or(
+                    filterBuilder.Regex("accountType", keywordRegex),
+                    filterBuilder.Regex("accountName", keywordRegex),
+                    filterBuilder.Regex("accountNameLocal", keywordRegex)
+                ));
+            }
+
+            var finalFilter = filters.Count == 0 ? filterBuilder.Empty : filterBuilder.And(filters);
+
+            var docs = await _apiDocumentDbContext.AccountTypes
+                .Find(finalFilter)
+                .Limit(maxItems)
+                .ToListAsync();
+
+            var items = docs
+                .Select(doc =>
+                {
+                    var accountType = GetBsonString(doc, "accountType");
+                    var accountName = GetBsonString(doc, "accountName");
+                    var accountNameLocal = GetBsonString(doc, "accountNameLocal");
+                    var displayName = !string.IsNullOrWhiteSpace(accountNameLocal) ? accountNameLocal : accountName;
+
+                    return new
+                    {
+                        value = accountType,
+                        label = string.IsNullOrWhiteSpace(displayName) ? accountType : $"{accountType} - {displayName}",
+                        accountType,
+                        accountName,
+                        accountNameLocal,
+                    };
+                })
+                .Where(x => !string.IsNullOrWhiteSpace(x.value))
+                .OrderBy(x => x.accountType, StringComparer.Ordinal)
+                .ToList();
+
+            return Ok(items);
         }
 
         [HttpPost("customers")]
@@ -1663,6 +1727,21 @@ namespace ApiPlugin.Controllers
             return !string.IsNullOrWhiteSpace(source)
                 && !string.IsNullOrWhiteSpace(keyword)
                 && source.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static string GetBsonString(BsonDocument source, string key)
+        {
+            if (source == null || string.IsNullOrWhiteSpace(key))
+            {
+                return string.Empty;
+            }
+
+            if (!source.TryGetValue(key, out var value) || value == null || value.IsBsonNull)
+            {
+                return string.Empty;
+            }
+
+            return value.ToString().Trim();
         }
 
         private class DebtListItemDto

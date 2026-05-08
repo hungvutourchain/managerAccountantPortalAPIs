@@ -14,6 +14,7 @@ using B2BAdmin.ApiDocument.Infrastructure;
 using B2BAdmin.ApiDocument.Domains.Models;
 using Microsoft.EntityFrameworkCore;
 using Mapster;
+using B2BAdmin.ApiDocument.API.Services;
 
 namespace B2BAdmin.ApiDocument.Services
 {
@@ -21,13 +22,16 @@ namespace B2BAdmin.ApiDocument.Services
     {
         private readonly ApiDocumentDbContext _apiDocumentDbContext;
         private readonly IConfiguration _configuration;
+        private readonly TwoFactorStateStore _twoFactorStateStore;
         public AuthenticateApiDocumentRequest(
             ApiDocumentDbContext dbContext,
-            IConfiguration configuration
+            IConfiguration configuration,
+            TwoFactorStateStore twoFactorStateStore
             )
         {
             _apiDocumentDbContext = dbContext;
             _configuration = configuration;
+            _twoFactorStateStore = twoFactorStateStore;
         }
 
         public async Task<AuthenticateResponseDocument> Handle(AuthenticateApiDocumentCommand request, CancellationToken cancellationToken)
@@ -48,7 +52,33 @@ namespace B2BAdmin.ApiDocument.Services
 
                     }, "", "Your username or password is incorrect."
                 );
-                // authentication successful so generate jwt token
+                var requiresGoogle2FA = user.TwoFAGoogle;
+                var requiresTwoFactor = user.TwoFactorEnabled || requiresGoogle2FA;
+
+                if (requiresTwoFactor)
+                {
+                    if (requiresGoogle2FA && !string.IsNullOrWhiteSpace(user.SecretKey))
+                    {
+                        _twoFactorStateStore.SaveUserSecret(user.Id, user.SecretKey, true);
+                    }
+
+                    var secondFactorPassed = _twoFactorStateStore.ConsumeSecondFactorVerified(user.Id);
+                    if (!secondFactorPassed)
+                    {
+                        return new AuthenticateResponseDocument(user, "", "Two-factor authentication required")
+                        {
+                            Requires2FA = true,
+                            Require2FA = true,
+                            OtpRequired = true,
+                            TwoFAGoogle = requiresGoogle2FA,
+                            RequireGoogle2FA = requiresGoogle2FA,
+                            TwoFactorType = requiresGoogle2FA ? "google" : "email",
+                            TwoFactorChallengeId = Guid.NewGuid().ToString("N")
+                        };
+                    }
+                }
+
+                // authentication successful and 2FA is satisfied, so generate jwt token
                 var token = generateJwtToken(user);
                 return new AuthenticateResponseDocument(user, token, "");
             }

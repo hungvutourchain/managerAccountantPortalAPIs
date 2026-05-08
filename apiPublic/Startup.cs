@@ -1,6 +1,7 @@
 using System;
 using System.Net;
 using System.Text.Json.Serialization;
+using B2BAdmin.ApiDocument.API.Services;
 using B2BAdmin.ApiDocument.Helpers;
 using B2BAdmin.ApiDocument.Infrastructure;
 using B2BAdmin.ApiDocument.Services;
@@ -73,6 +74,7 @@ namespace ApiPlugin
             services.AddScoped<IUserServiceDocument, UserServiceDocument>();
             services.AddHttpClient();
             services.AddHttpContextAccessor();
+            services.AddSingleton<TwoFactorStateStore>();
             services.AddMediatR(typeof(Startup));
             services.AddTransient(typeof(IPipelineBehavior<,>), typeof(RequestValidationBehavior<,>));
             services.AddSwaggerGen(c =>

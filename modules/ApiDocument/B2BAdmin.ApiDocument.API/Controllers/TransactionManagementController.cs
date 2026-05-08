@@ -11,7 +11,7 @@ using MongoDB.Driver;
 using OfficeOpenXml;
 using OfficeOpenXml.Style;
 
-namespace ApiPlugin.Controllers
+namespace B2BAdmin.ApiDocument.API.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
@@ -172,11 +172,33 @@ namespace ApiPlugin.Controllers
                 }
             }
 
-            var customerFilter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, transaction.customerId);
-            var customer = await _apiDocumentDbContext.CustomerAccounts.Find(customerFilter).FirstOrDefaultAsync();
-            if (customer == null || customer.isDeleted)
+            var sourceCustomerId = transaction.customerId;
+            var nextCustomerId = string.IsNullOrWhiteSpace(payload.customerId)
+                ? sourceCustomerId
+                : payload.customerId.Trim();
+            if (string.IsNullOrWhiteSpace(nextCustomerId))
+            {
+                return BadRequest("customerId is required");
+            }
+
+            var sourceCustomerFilter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, sourceCustomerId);
+            var sourceCustomer = await _apiDocumentDbContext.CustomerAccounts.Find(sourceCustomerFilter).FirstOrDefaultAsync();
+            if (sourceCustomer == null || sourceCustomer.isDeleted)
             {
                 return NotFound("Customer not found");
+            }
+
+            var customerChanged = !string.Equals(sourceCustomerId, nextCustomerId, StringComparison.Ordinal);
+            var targetCustomer = sourceCustomer;
+            FilterDefinition<CustomerAccount> targetCustomerFilter = sourceCustomerFilter;
+            if (customerChanged)
+            {
+                targetCustomerFilter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, nextCustomerId);
+                targetCustomer = await _apiDocumentDbContext.CustomerAccounts.Find(targetCustomerFilter).FirstOrDefaultAsync();
+                if (targetCustomer == null || targetCustomer.isDeleted)
+                {
+                    return NotFound("Target customer not found");
+                }
             }
 
             var actor = GetCurrentActor();
@@ -184,79 +206,139 @@ namespace ApiPlugin.Controllers
             var oldAmount = transaction.amount;
             var oldTransactionAt = transaction.transactionAt;
             var oldNote = transaction.note;
-            var oldDebtAmount = customer.debtAmount;
-            var oldCreditAmount = customer.creditAmount;
-            var oldLastTransactionAt = customer.lastTransactionAt;
+            var oldCustomerId = sourceCustomerId;
+
+            var oldSourceDebtAmount = sourceCustomer.debtAmount;
+            var oldSourceCreditAmount = sourceCustomer.creditAmount;
+            var oldSourceLastTransactionAt = sourceCustomer.lastTransactionAt;
+
+            var oldTargetDebtAmount = targetCustomer.debtAmount;
+            var oldTargetCreditAmount = targetCustomer.creditAmount;
+            var oldTargetLastTransactionAt = targetCustomer.lastTransactionAt;
 
             var nextTransactionAt = payload.transactionAt ?? transaction.transactionAt;
 
             if (string.Equals(oldType, "debt", StringComparison.OrdinalIgnoreCase))
             {
-                customer.debtAmount -= oldAmount;
+                sourceCustomer.debtAmount -= oldAmount;
             }
             else
             {
-                customer.creditAmount -= oldAmount;
+                sourceCustomer.creditAmount -= oldAmount;
             }
 
             if (string.Equals(transactionType, "debt", StringComparison.OrdinalIgnoreCase))
             {
-                customer.debtAmount += payload.amount;
+                targetCustomer.debtAmount += payload.amount;
             }
             else
             {
-                customer.creditAmount += payload.amount;
+                targetCustomer.creditAmount += payload.amount;
             }
 
+            transaction.customerId = targetCustomer.Id;
             transaction.transactionType = transactionType;
             transaction.amount = payload.amount;
             transaction.transactionAt = nextTransactionAt;
             transaction.note = payload.note;
 
-            var otherTransactionDates = await _apiDocumentDbContext.CustomerDebtTransactions
-                .Find(x => x.customerId == customer.Id && x.id != transactionId && !x.isDeleted)
+            var sourceOtherTransactionDates = await _apiDocumentDbContext.CustomerDebtTransactions
+                .Find(x => x.customerId == sourceCustomer.Id && x.id != transactionId && !x.isDeleted)
                 .Project(x => x.transactionAt)
                 .ToListAsync();
-            customer.lastTransactionAt = otherTransactionDates.Count == 0
+
+            if (customerChanged)
+            {
+                sourceCustomer.lastTransactionAt = sourceOtherTransactionDates.Count == 0
+                    ? default
+                    : sourceOtherTransactionDates.Max();
+            }
+            else
+            {
+                sourceCustomer.lastTransactionAt = sourceOtherTransactionDates.Count == 0
+                    ? nextTransactionAt
+                    : new[] { nextTransactionAt, sourceOtherTransactionDates.Max() }.Max();
+            }
+
+            var targetOtherTransactionDates = customerChanged
+                ? await _apiDocumentDbContext.CustomerDebtTransactions
+                    .Find(x => x.customerId == targetCustomer.Id && x.id != transactionId && !x.isDeleted)
+                    .Project(x => x.transactionAt)
+                    .ToListAsync()
+                : sourceOtherTransactionDates;
+
+            targetCustomer.lastTransactionAt = targetOtherTransactionDates.Count == 0
                 ? nextTransactionAt
-                : new[] { nextTransactionAt, otherTransactionDates.Max() }.Max();
-            customer.updatedAt = DateTime.UtcNow;
-            customer.updatedBy = actor;
+                : new[] { nextTransactionAt, targetOtherTransactionDates.Max() }.Max();
+
+            sourceCustomer.updatedAt = DateTime.UtcNow;
+            sourceCustomer.updatedBy = actor;
+
+            if (customerChanged)
+            {
+                targetCustomer.updatedAt = DateTime.UtcNow;
+                targetCustomer.updatedBy = actor;
+            }
 
             transaction.updatedAt = DateTime.UtcNow;
             transaction.updatedBy = actor;
 
             await _apiDocumentDbContext.CustomerDebtTransactions.ReplaceOneAsync(transactionFilter, transaction);
-            await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(customerFilter, customer);
+            await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(sourceCustomerFilter, sourceCustomer);
+            if (customerChanged)
+            {
+                await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(targetCustomerFilter, targetCustomer);
+            }
 
             var logs = new List<CustomerAuditLogEntry>
             {
-                CreateAuditLogEntry(customer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.transactionType", NormalizeText(oldType), NormalizeText(transaction.transactionType), actor, payload.note),
-                CreateAuditLogEntry(customer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.amount", oldAmount.ToString(), transaction.amount.ToString(), actor, payload.note),
-                CreateAuditLogEntry(customer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.transactionAt", FormatDateTime(oldTransactionAt), FormatDateTime(transaction.transactionAt), actor, payload.note),
-                CreateAuditLogEntry(customer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.note", NormalizeText(oldNote), NormalizeText(transaction.note), actor, payload.note),
+                CreateAuditLogEntry(targetCustomer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.transactionType", NormalizeText(oldType), NormalizeText(transaction.transactionType), actor, payload.note),
+                CreateAuditLogEntry(targetCustomer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.amount", oldAmount.ToString(), transaction.amount.ToString(), actor, payload.note),
+                CreateAuditLogEntry(targetCustomer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.transactionAt", FormatDateTime(oldTransactionAt), FormatDateTime(transaction.transactionAt), actor, payload.note),
+                CreateAuditLogEntry(targetCustomer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.note", NormalizeText(oldNote), NormalizeText(transaction.note), actor, payload.note),
             };
 
-            if (oldDebtAmount != customer.debtAmount)
+            if (!string.Equals(oldCustomerId, transaction.customerId, StringComparison.Ordinal))
             {
-                logs.Add(CreateAuditLogEntry(customer.Id, null, "transaction", "debtAmount", oldDebtAmount.ToString(), customer.debtAmount.ToString(), actor, payload.note));
+                logs.Add(CreateAuditLogEntry(targetCustomer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.customerId", NormalizeText(oldCustomerId), NormalizeText(transaction.customerId), actor, payload.note));
             }
 
-            if (oldCreditAmount != customer.creditAmount)
+            if (oldSourceDebtAmount != sourceCustomer.debtAmount)
             {
-                logs.Add(CreateAuditLogEntry(customer.Id, null, "transaction", "creditAmount", oldCreditAmount.ToString(), customer.creditAmount.ToString(), actor, payload.note));
+                logs.Add(CreateAuditLogEntry(sourceCustomer.Id, null, "transaction", "debtAmount", oldSourceDebtAmount.ToString(), sourceCustomer.debtAmount.ToString(), actor, payload.note));
             }
 
-            logs.Add(CreateAuditLogEntry(customer.Id, null, "transaction", "lastTransactionAt", FormatDateTime(oldLastTransactionAt), FormatDateTime(customer.lastTransactionAt), actor, payload.note));
+            if (oldSourceCreditAmount != sourceCustomer.creditAmount)
+            {
+                logs.Add(CreateAuditLogEntry(sourceCustomer.Id, null, "transaction", "creditAmount", oldSourceCreditAmount.ToString(), sourceCustomer.creditAmount.ToString(), actor, payload.note));
+            }
+
+            logs.Add(CreateAuditLogEntry(sourceCustomer.Id, null, "transaction", "lastTransactionAt", FormatDateTime(oldSourceLastTransactionAt), FormatDateTime(sourceCustomer.lastTransactionAt), actor, payload.note));
+
+            if (customerChanged)
+            {
+                if (oldTargetDebtAmount != targetCustomer.debtAmount)
+                {
+                    logs.Add(CreateAuditLogEntry(targetCustomer.Id, null, "transaction", "debtAmount", oldTargetDebtAmount.ToString(), targetCustomer.debtAmount.ToString(), actor, payload.note));
+                }
+
+                if (oldTargetCreditAmount != targetCustomer.creditAmount)
+                {
+                    logs.Add(CreateAuditLogEntry(targetCustomer.Id, null, "transaction", "creditAmount", oldTargetCreditAmount.ToString(), targetCustomer.creditAmount.ToString(), actor, payload.note));
+                }
+
+                logs.Add(CreateAuditLogEntry(targetCustomer.Id, null, "transaction", "lastTransactionAt", FormatDateTime(oldTargetLastTransactionAt), FormatDateTime(targetCustomer.lastTransactionAt), actor, payload.note));
+            }
+
             await AppendCustomerAuditLogsAsync(logs);
 
             return Ok(new
             {
                 success = true,
-                customerId = customer.Id,
-                debtAmount = customer.debtAmount,
-                creditAmount = customer.creditAmount,
-                netBalance = GetNetBalance(customer),
+                customerId = targetCustomer.Id,
+                debtAmount = targetCustomer.debtAmount,
+                creditAmount = targetCustomer.creditAmount,
+                netBalance = GetNetBalance(targetCustomer),
                 transaction
             });
         }
@@ -1018,6 +1100,7 @@ namespace ApiPlugin.Controllers
 
         public class UpdateDebtTransactionRequest
         {
+            public string customerId { get; set; }
             public string transactionType { get; set; }
             public decimal amount { get; set; }
             public DateTime? transactionAt { get; set; }

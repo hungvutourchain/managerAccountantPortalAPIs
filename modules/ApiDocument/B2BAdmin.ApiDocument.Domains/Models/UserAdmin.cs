@@ -52,5 +52,17 @@ namespace B2BAdmin.ApiDocument.Domains.Models
         [BsonElement("Email")]
         [JsonPropertyName("Email")]
         public string? Email { get; set; }
+
+        [BsonElement("twoFAGoogle")]
+        [JsonPropertyName("twoFAGoogle")]
+        public bool TwoFAGoogle { get; set; }
+
+        [BsonElement("twoFactorEnabled")]
+        [JsonPropertyName("twoFactorEnabled")]
+        public bool TwoFactorEnabled { get; set; }
+
+        [BsonElement("SecretKey")]
+        [JsonPropertyName("SecretKey")]
+        public string? SecretKey { get; set; }
     }
 }

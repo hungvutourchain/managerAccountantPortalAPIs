@@ -14,7 +14,7 @@ services:
       ConnectionStrings__sqlTourChain: 'Data Source=128.199.72.245;User ID=sa;Password=Pa$$sword279;Initial Catalog=TourChainSql;Connect Timeout=30;Encrypt=False;TrustServerCertificate=False;ApplicationIntent=ReadWrite;MultiSubnetFailover=False'
       Sentry_Source: "netCoreApiAccountantPortal"
       Sentry_Environment: "Live"
-      TourChainIssuer: "Terraverde"
+      AccountantPortalIssuer: "Accountant Portal"
       NotificationApiKey: "NotificationApiKeytrial"
       RedisUrl: "tourchain_redis:6379,password=Tourchain@123456,allowAdmin=true"
       CorsOrigins__0: http://159.89.193.175
