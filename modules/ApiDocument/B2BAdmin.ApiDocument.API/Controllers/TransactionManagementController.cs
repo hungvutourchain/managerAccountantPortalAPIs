@@ -4,6 +4,8 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Threading;
+using B2BAdmin.ApiDocument.API.Services;
 using B2BAdmin.ApiDocument.Domains.Models;
 using B2BAdmin.ApiDocument.Infrastructure;
 using Microsoft.AspNetCore.Mvc;
@@ -18,10 +20,12 @@ namespace B2BAdmin.ApiDocument.API.Controllers
     public class TransactionManagementController : ControllerBase
     {
         private readonly ApiDocumentDbContext _apiDocumentDbContext;
+        private readonly IDebtAiService _debtAiService;
 
-        public TransactionManagementController(ApiDocumentDbContext apiDocumentDbContext)
+        public TransactionManagementController(ApiDocumentDbContext apiDocumentDbContext, IDebtAiService debtAiService)
         {
             _apiDocumentDbContext = apiDocumentDbContext;
+            _debtAiService = debtAiService;
         }
 
         [HttpPost("transactions")]
@@ -565,6 +569,42 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 totalPages = (int)Math.Ceiling(totalItems / (double)pageSize),
                 items
             });
+        }
+
+        [HttpPost("debt-ai/query")]
+        public async Task<IActionResult> QueryDebtAiAsync([FromBody] DebtAiQueryRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Prompt))
+            {
+                return BadRequest(new { message = "prompt is required" });
+            }
+
+            try
+            {
+                var result = await _debtAiService.AnalyzeAsync(request, cancellationToken);
+                return Ok(new
+                {
+                    provider = result.Provider,
+                    model = result.Model,
+                    summary = result.Summary,
+                    findings = result.Findings,
+                    recommendations = result.Recommendations,
+                    relatedCustomers = result.RelatedCustomers,
+                    scopeNotes = result.ScopeNotes,
+                    suggestedQuestions = result.SuggestedQuestions,
+                    answer = result.Answer,
+                    rawText = result.RawText,
+                    generatedAt = result.GeneratedAt,
+                });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
         }
 
         [HttpGet("customers/{customerId}/export-excel")]

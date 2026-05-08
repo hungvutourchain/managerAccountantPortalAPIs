@@ -72,6 +72,7 @@ namespace ApiPlugin
             );
             services.AddValidatorsFromAssemblyContaining(typeof(Startup), ServiceLifetime.Transient);
             services.AddScoped<IUserServiceDocument, UserServiceDocument>();
+            services.AddScoped<IDebtAiService, DebtAiService>();
             services.AddHttpClient();
             services.AddHttpContextAccessor();
             services.AddSingleton<TwoFactorStateStore>();

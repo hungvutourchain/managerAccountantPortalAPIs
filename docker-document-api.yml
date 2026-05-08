@@ -24,6 +24,12 @@ services:
       Deepseek__ModelName: "deepseek-chat"
       Deepseek__DefaultLanguage: "English"
       Deepseek__SystemPrompt: "You are a helpful assistant. Please respond in English."
+      Gemini__ApiKey: "AIzaSyBzuz-spN19GWtO9KuMrweSbXzrlqXCsd4"
+      Gemini__ApiEndpoint: "https://generativelanguage.googleapis.com/v1beta/models"
+      Gemini__ModelName: "gemini-2.0-flash"
+      Gemini__TimeoutSeconds: "45"
+      Gemini__DefaultLanguage: "Vietnamese"
+      Gemini__SystemPrompt: "You are a debt analysis assistant for an accounting portal. Answer in Vietnamese by default unless the user asks for English. Use only the provided debt data."
     networks:
       - general
 
