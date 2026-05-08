@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
 COPY . .
+RUN cp apiPublic/nuget.config ./nuget.config
 RUN dotnet restore "apiPublic/apiPublic.csproj"
 WORKDIR "/src/apiPublic"
 RUN dotnet build "apiPublic.csproj" -c Release -o /app/build
