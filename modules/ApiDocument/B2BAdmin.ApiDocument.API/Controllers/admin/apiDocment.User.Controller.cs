@@ -95,12 +95,22 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 return Unauthorized(new { message = "Invalid token" });
             }
 
-            var update = Builders<B2BAdmin.ApiDocument.Domains.Models.UserAdmin>.Update
+            var updateDef = Builders<B2BAdmin.ApiDocument.Domains.Models.UserAdmin>.Update
                 .Set(u => u.TwoFAGoogle, request.TwoFAGoogle)
                 .Set(u => u.TwoFactorEnabled, request.TwoFactorEnabled)
                 .Set(u => u.SecretKey, request.SecretKey ?? string.Empty);
 
-            await _db.AdminUsers.UpdateOneAsync(u => u.Id == userId, update);
+            if (!string.IsNullOrWhiteSpace(request.FullName))
+                updateDef = updateDef.Set(u => u.FullName, request.FullName.Trim());
+
+            if (!string.IsNullOrWhiteSpace(request.Email))
+                updateDef = updateDef.Set(u => u.Email, request.Email.Trim());
+
+            // Only update password if a new hashed value is explicitly provided
+            if (!string.IsNullOrWhiteSpace(request.pass))
+                updateDef = updateDef.Set(u => u.Password, request.pass.Trim());
+
+            await _db.AdminUsers.UpdateOneAsync(u => u.Id == userId, updateDef);
 
             return Ok(new { success = true });
         }
@@ -116,5 +126,14 @@ namespace B2BAdmin.ApiDocument.API.Controllers
 
         [JsonPropertyName("SecretKey")]
         public string? SecretKey { get; set; }
+
+        [JsonPropertyName("FullName")]
+        public string? FullName { get; set; }
+
+        [JsonPropertyName("Email")]
+        public string? Email { get; set; }
+
+        [JsonPropertyName("pass")]
+        public string? pass { get; set; }
     }
 }
