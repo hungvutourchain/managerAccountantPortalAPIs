@@ -1223,7 +1223,9 @@ namespace B2BAdmin.ApiDocument.API.Controllers
         }
 
         [HttpGet("debt/customers/{customerId}/export-excel")]
-        public async Task<IActionResult> ExportDebtCustomerExcelAsync(string customerId)
+        public async Task<IActionResult> ExportDebtCustomerExcelAsync(
+            string customerId,
+            [FromQuery] string transactionIds = null)
         {
             if (string.IsNullOrWhiteSpace(customerId))
             {
@@ -1239,10 +1241,29 @@ namespace B2BAdmin.ApiDocument.API.Controllers
 
             await MigrateLegacyDataForCustomerAsync(customer, true);
 
-            var transactions = await _apiDocumentDbContext.CustomerDebtTransactions
-                .Find(x => x.customerId == customerId)
-                .SortBy(x => x.transactionAt)
-                .ToListAsync();
+            List<CustomerDebtTransaction> transactions;
+            var requestedIds = (transactionIds ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (requestedIds.Count > 0)
+            {
+                var allTransactions = await _apiDocumentDbContext.CustomerDebtTransactions
+                    .Find(x => x.customerId == customerId)
+                    .SortBy(x => x.transactionAt)
+                    .ToListAsync();
+                transactions = allTransactions
+                    .Where(t => requestedIds.Contains(t.id ?? string.Empty))
+                    .ToList();
+            }
+            else
+            {
+                transactions = await _apiDocumentDbContext.CustomerDebtTransactions
+                    .Find(x => x.customerId == customerId)
+                    .SortBy(x => x.transactionAt)
+                    .ToListAsync();
+            }
 
             var fileBytes = BuildDebtCustomerExcelFile(customer, transactions);
             var safeCode = string.IsNullOrWhiteSpace(customer.code)
