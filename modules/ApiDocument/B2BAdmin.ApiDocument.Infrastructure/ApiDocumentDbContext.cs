@@ -53,6 +53,8 @@ namespace B2BAdmin.ApiDocument.Infrastructure
         public MongoDB.Driver.IMongoCollection<ProCodes> ProCodes { get { return _database.GetCollection<ProCodes>("procodes"); } }
         public MongoDB.Driver.IMongoCollection<lsNation> Countries { get { return _database.GetCollection<lsNation>("countries"); } }
         public MongoDB.Driver.IMongoCollection<CustomerAccount> CustomerAccounts { get { return _database.GetCollection<CustomerAccount>("customer_accounts"); } }
+        public MongoDB.Driver.IMongoCollection<CustomerDebtTransaction> CustomerDebtTransactions { get { return _database.GetCollection<CustomerDebtTransaction>("customer_debt_transactions"); } }
+        public MongoDB.Driver.IMongoCollection<CustomerAuditLogEntry> CustomerAuditLogs { get { return _database.GetCollection<CustomerAuditLogEntry>("customer_audit_logs"); } }
 
         //
 

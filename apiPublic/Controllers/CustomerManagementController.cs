@@ -121,12 +121,21 @@ namespace ApiPlugin.Controllers
 
             if (string.IsNullOrWhiteSpace(payload.Id))
             {
+                payload.Id = MongoDB.Bson.ObjectId.GenerateNewId().ToString();
                 payload.createdAt = now;
                 payload.createdBy = actor;
-                payload.debtTransactions ??= new List<DebtTransactionRecord>();
-                payload.auditLogs ??= new List<CustomerAuditLog>();
-                AddAuditLog(payload, "create", "record", null, BuildRecordSnapshot(payload), actor, "Customer created");
                 await _apiDocumentDbContext.CustomerAccounts.InsertOneAsync(payload);
+
+                await AppendCustomerAuditLogAsync(CreateAuditLogEntry(
+                    payload.Id,
+                    null,
+                    "create",
+                    "record",
+                    null,
+                    BuildRecordSnapshot(payload),
+                    actor,
+                    "Customer created"));
+
                 return Ok(payload);
             }
 
@@ -140,21 +149,36 @@ namespace ApiPlugin.Controllers
 
             payload.createdAt = existing.createdAt;
             payload.createdBy = existing.createdBy;
-            payload.debtTransactions = existing.debtTransactions ?? new List<DebtTransactionRecord>();
-            payload.auditLogs = existing.auditLogs ?? new List<CustomerAuditLog>();
 
             var changes = BuildCustomerChanges(existing, payload);
-            foreach (var change in changes)
-            {
-                AddAuditLog(payload, "update", change.field, change.oldValue, change.newValue, actor, null);
-            }
-
-            if (changes.Count == 0)
-            {
-                AddAuditLog(payload, "touch", "record", null, null, actor, "No field value changed");
-            }
 
             await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(filter, payload);
+
+            if (changes.Count > 0)
+            {
+                var logs = changes.Select(change => CreateAuditLogEntry(
+                    payload.Id,
+                    null,
+                    "update",
+                    change.field,
+                    change.oldValue,
+                    change.newValue,
+                    actor,
+                    null));
+                await AppendCustomerAuditLogsAsync(logs);
+            }
+            else
+            {
+                await AppendCustomerAuditLogAsync(CreateAuditLogEntry(
+                    payload.Id,
+                    null,
+                    "touch",
+                    "record",
+                    null,
+                    null,
+                    actor,
+                    "No field value changed"));
+            }
 
             return Ok(payload);
         }
@@ -181,15 +205,16 @@ namespace ApiPlugin.Controllers
                 return NotFound();
             }
 
-            var logs = (customer.auditLogs ?? new List<CustomerAuditLog>())
-                .OrderByDescending(x => x.changedAt)
-                .ToList();
+            await MigrateLegacyDataForCustomerAsync(customer, true);
 
-            var totalItems = logs.Count;
-            var items = logs
+            var logsFilter = Builders<CustomerAuditLogEntry>.Filter.Eq(x => x.customerId, id);
+            var totalItems = (int)await _apiDocumentDbContext.CustomerAuditLogs.CountDocumentsAsync(logsFilter);
+            var items = await _apiDocumentDbContext.CustomerAuditLogs
+                .Find(logsFilter)
+                .SortByDescending(x => x.changedAt)
                 .Skip((page - 1) * pageSize)
-                .Take(pageSize)
-                .ToList();
+                .Limit(pageSize)
+                .ToListAsync();
 
             return Ok(new
             {
@@ -217,7 +242,54 @@ namespace ApiPlugin.Controllers
                 return NotFound();
             }
 
+            var transactionFilter = Builders<CustomerDebtTransaction>.Filter.Eq(x => x.customerId, id);
+            var auditFilter = Builders<CustomerAuditLogEntry>.Filter.Eq(x => x.customerId, id);
+            await _apiDocumentDbContext.CustomerDebtTransactions.DeleteManyAsync(transactionFilter);
+            await _apiDocumentDbContext.CustomerAuditLogs.DeleteManyAsync(auditFilter);
+
             return Ok(new { success = true });
+        }
+
+        [HttpPost("maintenance/migrate-legacy-customer-data")]
+        public async Task<IActionResult> MigrateLegacyCustomerDataAsync([FromQuery] int batchSize = 500)
+        {
+            batchSize = batchSize < 1 ? 500 : Math.Min(batchSize, 5000);
+
+            var filterBuilder = Builders<CustomerAccount>.Filter;
+            var migrationFilter = filterBuilder.Or(
+                filterBuilder.SizeGt(x => x.debtTransactions, 0),
+                filterBuilder.SizeGt(x => x.auditLogs, 0));
+
+            var customers = await _apiDocumentDbContext.CustomerAccounts
+                .Find(migrationFilter)
+                .Limit(batchSize)
+                .ToListAsync();
+
+            var scanned = 0;
+            var migratedTransactions = 0;
+            var migratedAuditLogs = 0;
+            var clearedCustomers = 0;
+
+            foreach (var customer in customers)
+            {
+                scanned++;
+                var result = await MigrateLegacyDataForCustomerAsync(customer, true);
+                migratedTransactions += result.migratedTransactions;
+                migratedAuditLogs += result.migratedAuditLogs;
+                if (result.clearedLegacy)
+                {
+                    clearedCustomers++;
+                }
+            }
+
+            return Ok(new
+            {
+                scanned,
+                migratedTransactions,
+                migratedAuditLogs,
+                clearedCustomers,
+                hasMore = scanned >= batchSize
+            });
         }
 
         [HttpGet("debt/overview")]
@@ -395,26 +467,20 @@ namespace ApiPlugin.Controllers
                 return NotFound("Customer not found");
             }
 
-            if (customer.debtTransactions == null)
-            {
-                customer.debtTransactions = new List<DebtTransactionRecord>();
-            }
-
-            if (customer.auditLogs == null)
-            {
-                customer.auditLogs = new List<CustomerAuditLog>();
-            }
+            await MigrateLegacyDataForCustomerAsync(customer, true);
 
             var actor = GetCurrentActor();
             var oldDebtAmount = customer.debtAmount;
             var oldCreditAmount = customer.creditAmount;
             var oldLastTransactionAt = customer.lastTransactionAt;
-            var oldTransactionCount = customer.debtTransactions.Count;
+            var transactionCountFilter = Builders<CustomerDebtTransaction>.Filter.Eq(x => x.customerId, customer.Id);
+            var oldTransactionCount = (int)await _apiDocumentDbContext.CustomerDebtTransactions.CountDocumentsAsync(transactionCountFilter);
 
             var transactionAt = payload.transactionAt ?? DateTime.UtcNow;
-            var transaction = new DebtTransactionRecord
+            var transaction = new CustomerDebtTransaction
             {
                 id = Guid.NewGuid().ToString("N"),
+                customerId = customer.Id,
                 transactionType = transactionType,
                 amount = payload.amount,
                 transactionAt = transactionAt,
@@ -423,7 +489,8 @@ namespace ApiPlugin.Controllers
                 createdBy = actor,
             };
 
-            customer.debtTransactions.Add(transaction);
+            await _apiDocumentDbContext.CustomerDebtTransactions.InsertOneAsync(transaction);
+
             if (transactionType == "debt")
             {
                 customer.debtAmount += payload.amount;
@@ -437,24 +504,29 @@ namespace ApiPlugin.Controllers
             customer.updatedAt = DateTime.UtcNow;
             customer.updatedBy = actor;
 
-            AddAuditLog(customer, "transaction-create", $"debtTransaction.{transaction.id}.transactionType", null, transaction.transactionType, actor, payload.note);
-            AddAuditLog(customer, "transaction-create", $"debtTransaction.{transaction.id}.amount", null, transaction.amount.ToString(), actor, payload.note);
-            AddAuditLog(customer, "transaction-create", $"debtTransaction.{transaction.id}.transactionAt", null, FormatDateTime(transaction.transactionAt), actor, payload.note);
-            AddAuditLog(customer, "transaction-create", $"debtTransaction.{transaction.id}.note", null, NormalizeText(transaction.note), actor, payload.note);
-            AddAuditLog(customer, "transaction", "debtTransactions.count", oldTransactionCount.ToString(), customer.debtTransactions.Count.ToString(), actor, payload.note);
+            await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(filter, customer);
+
+            var logs = new List<CustomerAuditLogEntry>
+            {
+                CreateAuditLogEntry(customer.Id, transaction.id, "transaction-create", $"debtTransaction.{transaction.id}.transactionType", null, transaction.transactionType, actor, payload.note),
+                CreateAuditLogEntry(customer.Id, transaction.id, "transaction-create", $"debtTransaction.{transaction.id}.amount", null, transaction.amount.ToString(), actor, payload.note),
+                CreateAuditLogEntry(customer.Id, transaction.id, "transaction-create", $"debtTransaction.{transaction.id}.transactionAt", null, FormatDateTime(transaction.transactionAt), actor, payload.note),
+                CreateAuditLogEntry(customer.Id, transaction.id, "transaction-create", $"debtTransaction.{transaction.id}.note", null, NormalizeText(transaction.note), actor, payload.note),
+                CreateAuditLogEntry(customer.Id, null, "transaction", "debtTransactions.count", oldTransactionCount.ToString(), (oldTransactionCount + 1).ToString(), actor, payload.note),
+            };
+
             if (oldDebtAmount != customer.debtAmount)
             {
-                AddAuditLog(customer, "transaction", "debtAmount", oldDebtAmount.ToString(), customer.debtAmount.ToString(), actor, payload.note);
+                logs.Add(CreateAuditLogEntry(customer.Id, null, "transaction", "debtAmount", oldDebtAmount.ToString(), customer.debtAmount.ToString(), actor, payload.note));
             }
 
             if (oldCreditAmount != customer.creditAmount)
             {
-                AddAuditLog(customer, "transaction", "creditAmount", oldCreditAmount.ToString(), customer.creditAmount.ToString(), actor, payload.note);
+                logs.Add(CreateAuditLogEntry(customer.Id, null, "transaction", "creditAmount", oldCreditAmount.ToString(), customer.creditAmount.ToString(), actor, payload.note));
             }
 
-            AddAuditLog(customer, "transaction", "lastTransactionAt", FormatDateTime(oldLastTransactionAt), FormatDateTime(customer.lastTransactionAt), actor, payload.note);
-
-            await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(filter, customer);
+            logs.Add(CreateAuditLogEntry(customer.Id, null, "transaction", "lastTransactionAt", FormatDateTime(oldLastTransactionAt), FormatDateTime(customer.lastTransactionAt), actor, payload.note));
+            await AppendCustomerAuditLogsAsync(logs);
 
             return Ok(new
             {
@@ -463,7 +535,16 @@ namespace ApiPlugin.Controllers
                 debtAmount = customer.debtAmount,
                 creditAmount = customer.creditAmount,
                 netBalance = GetNetBalance(customer),
-                transaction
+                transaction = new
+                {
+                    id = transaction.id,
+                    transactionType = transaction.transactionType,
+                    amount = transaction.amount,
+                    transactionAt = transaction.transactionAt,
+                    note = transaction.note,
+                    createdAt = transaction.createdAt,
+                    createdBy = transaction.createdBy,
+                }
             });
         }
 
@@ -486,21 +567,30 @@ namespace ApiPlugin.Controllers
                 return BadRequest("transactionType must be debt or credit");
             }
 
-            var filter = Builders<CustomerAccount>.Filter.ElemMatch(x => x.debtTransactions, t => t.id == transactionId);
-            var customer = await _apiDocumentDbContext.CustomerAccounts.Find(filter).FirstOrDefaultAsync();
-
-            if (customer == null)
-            {
-                return NotFound("Transaction not found");
-            }
-
-            customer.debtTransactions ??= new List<DebtTransactionRecord>();
-            customer.auditLogs ??= new List<CustomerAuditLog>();
-
-            var transaction = customer.debtTransactions.FirstOrDefault(x => string.Equals(x.id, transactionId, StringComparison.Ordinal));
+            var transactionFilter = Builders<CustomerDebtTransaction>.Filter.Eq(x => x.id, transactionId);
+            var transaction = await _apiDocumentDbContext.CustomerDebtTransactions.Find(transactionFilter).FirstOrDefaultAsync();
             if (transaction == null)
             {
-                return NotFound("Transaction not found");
+                var legacyCustomerFilter = Builders<CustomerAccount>.Filter.ElemMatch(x => x.debtTransactions, t => t.id == transactionId);
+                var legacyCustomer = await _apiDocumentDbContext.CustomerAccounts.Find(legacyCustomerFilter).FirstOrDefaultAsync();
+                if (legacyCustomer == null)
+                {
+                    return NotFound("Transaction not found");
+                }
+
+                await MigrateLegacyDataForCustomerAsync(legacyCustomer, true);
+                transaction = await _apiDocumentDbContext.CustomerDebtTransactions.Find(transactionFilter).FirstOrDefaultAsync();
+                if (transaction == null)
+                {
+                    return NotFound("Transaction not found");
+                }
+            }
+
+            var customerFilter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, transaction.customerId);
+            var customer = await _apiDocumentDbContext.CustomerAccounts.Find(customerFilter).FirstOrDefaultAsync();
+            if (customer == null)
+            {
+                return NotFound("Customer not found");
             }
 
             var actor = GetCurrentActor();
@@ -537,31 +627,42 @@ namespace ApiPlugin.Controllers
             transaction.transactionAt = nextTransactionAt;
             transaction.note = payload.note;
 
-            customer.lastTransactionAt = customer.debtTransactions.Count == 0
-                ? (DateTime?)null
-                : customer.debtTransactions.Max(x => x.transactionAt);
+            var otherTransactionDates = await _apiDocumentDbContext.CustomerDebtTransactions
+                .Find(x => x.customerId == customer.Id && x.id != transactionId)
+                .Project(x => x.transactionAt)
+                .ToListAsync();
+            customer.lastTransactionAt = otherTransactionDates.Count == 0
+                ? nextTransactionAt
+                : new[] { nextTransactionAt, otherTransactionDates.Max() }.Max();
             customer.updatedAt = DateTime.UtcNow;
             customer.updatedBy = actor;
 
-            AddAuditLog(customer, "transaction-update", $"debtTransaction.{transactionId}.transactionType", NormalizeText(oldType), NormalizeText(transaction.transactionType), actor, payload.note);
-            AddAuditLog(customer, "transaction-update", $"debtTransaction.{transactionId}.amount", oldAmount.ToString(), transaction.amount.ToString(), actor, payload.note);
-            AddAuditLog(customer, "transaction-update", $"debtTransaction.{transactionId}.transactionAt", FormatDateTime(oldTransactionAt), FormatDateTime(transaction.transactionAt), actor, payload.note);
-            AddAuditLog(customer, "transaction-update", $"debtTransaction.{transactionId}.note", NormalizeText(oldNote), NormalizeText(transaction.note), actor, payload.note);
+            transaction.updatedAt = DateTime.UtcNow;
+            transaction.updatedBy = actor;
+
+            await _apiDocumentDbContext.CustomerDebtTransactions.ReplaceOneAsync(transactionFilter, transaction);
+            await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(customerFilter, customer);
+
+            var logs = new List<CustomerAuditLogEntry>
+            {
+                CreateAuditLogEntry(customer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.transactionType", NormalizeText(oldType), NormalizeText(transaction.transactionType), actor, payload.note),
+                CreateAuditLogEntry(customer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.amount", oldAmount.ToString(), transaction.amount.ToString(), actor, payload.note),
+                CreateAuditLogEntry(customer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.transactionAt", FormatDateTime(oldTransactionAt), FormatDateTime(transaction.transactionAt), actor, payload.note),
+                CreateAuditLogEntry(customer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.note", NormalizeText(oldNote), NormalizeText(transaction.note), actor, payload.note),
+            };
 
             if (oldDebtAmount != customer.debtAmount)
             {
-                AddAuditLog(customer, "transaction", "debtAmount", oldDebtAmount.ToString(), customer.debtAmount.ToString(), actor, payload.note);
+                logs.Add(CreateAuditLogEntry(customer.Id, null, "transaction", "debtAmount", oldDebtAmount.ToString(), customer.debtAmount.ToString(), actor, payload.note));
             }
 
             if (oldCreditAmount != customer.creditAmount)
             {
-                AddAuditLog(customer, "transaction", "creditAmount", oldCreditAmount.ToString(), customer.creditAmount.ToString(), actor, payload.note);
+                logs.Add(CreateAuditLogEntry(customer.Id, null, "transaction", "creditAmount", oldCreditAmount.ToString(), customer.creditAmount.ToString(), actor, payload.note));
             }
 
-            AddAuditLog(customer, "transaction", "lastTransactionAt", FormatDateTime(oldLastTransactionAt), FormatDateTime(customer.lastTransactionAt), actor, payload.note);
-
-            var customerFilter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, customer.Id);
-            await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(customerFilter, customer);
+            logs.Add(CreateAuditLogEntry(customer.Id, null, "transaction", "lastTransactionAt", FormatDateTime(oldLastTransactionAt), FormatDateTime(customer.lastTransactionAt), actor, payload.note));
+            await AppendCustomerAuditLogsAsync(logs);
 
             return Ok(new
             {
@@ -588,24 +689,40 @@ namespace ApiPlugin.Controllers
             page = page < 1 ? 1 : page;
             pageSize = pageSize < 1 ? 50 : Math.Min(pageSize, 200);
 
-            var filter = Builders<CustomerAccount>.Filter.ElemMatch(x => x.debtTransactions, t => t.id == transactionId);
-            var customer = await _apiDocumentDbContext.CustomerAccounts.Find(filter).FirstOrDefaultAsync();
-            if (customer == null)
+            var transactionFilter = Builders<CustomerDebtTransaction>.Filter.Eq(x => x.id, transactionId);
+            var transaction = await _apiDocumentDbContext.CustomerDebtTransactions.Find(transactionFilter).FirstOrDefaultAsync();
+            if (transaction == null)
             {
-                return NotFound("Transaction not found");
+                var legacyCustomerFilter = Builders<CustomerAccount>.Filter.ElemMatch(x => x.debtTransactions, t => t.id == transactionId);
+                var legacyCustomer = await _apiDocumentDbContext.CustomerAccounts.Find(legacyCustomerFilter).FirstOrDefaultAsync();
+                if (legacyCustomer == null)
+                {
+                    return NotFound("Transaction not found");
+                }
+
+                await MigrateLegacyDataForCustomerAsync(legacyCustomer, true);
+                transaction = await _apiDocumentDbContext.CustomerDebtTransactions.Find(transactionFilter).FirstOrDefaultAsync();
+                if (transaction == null)
+                {
+                    return NotFound("Transaction not found");
+                }
             }
 
-            var fieldPrefix = $"debtTransaction.{transactionId}.";
-            var logs = (customer.auditLogs ?? new List<CustomerAuditLog>())
-                .Where(x => !string.IsNullOrWhiteSpace(x.field) && x.field.StartsWith(fieldPrefix, StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(x => x.changedAt)
-                .ToList();
+            var fieldPrefixPattern = $"^debtTransaction\\.{transactionId}\\.";
+            var logsFilterBuilder = Builders<CustomerAuditLogEntry>.Filter;
+            var logsFilter = logsFilterBuilder.And(
+                logsFilterBuilder.Eq(x => x.customerId, transaction.customerId),
+                logsFilterBuilder.Or(
+                    logsFilterBuilder.Eq(x => x.transactionId, transactionId),
+                    logsFilterBuilder.Regex(x => x.field, new MongoDB.Bson.BsonRegularExpression(fieldPrefixPattern, "i"))));
 
-            var totalItems = logs.Count;
-            var items = logs
+            var totalItems = (int)await _apiDocumentDbContext.CustomerAuditLogs.CountDocumentsAsync(logsFilter);
+            var items = await _apiDocumentDbContext.CustomerAuditLogs
+                .Find(logsFilter)
+                .SortByDescending(x => x.changedAt)
                 .Skip((page - 1) * pageSize)
-                .Take(pageSize)
-                .ToList();
+                .Limit(pageSize)
+                .ToListAsync();
 
             return Ok(new
             {
@@ -630,26 +747,75 @@ namespace ApiPlugin.Controllers
             page = page < 1 ? 1 : page;
             pageSize = pageSize < 1 ? 20 : Math.Min(pageSize, 200);
 
-            var filterBuilder = Builders<CustomerAccount>.Filter;
-            FilterDefinition<CustomerAccount> filter = filterBuilder.Empty;
-
             if (!string.IsNullOrWhiteSpace(customerId))
             {
-                filter = filterBuilder.Eq(x => x.Id, customerId);
+                var customerExists = await _apiDocumentDbContext.CustomerAccounts
+                    .Find(x => x.Id == customerId)
+                    .AnyAsync();
+
+                if (!customerExists)
+                {
+                    return Ok(new
+                    {
+                        page,
+                        pageSize,
+                        totalItems = 0,
+                        totalPages = 0,
+                        items = new List<DebtTransactionListItem>()
+                    });
+                }
             }
 
-            var customers = await _apiDocumentDbContext.CustomerAccounts
-                .Find(filter)
+            var transactionFilterBuilder = Builders<CustomerDebtTransaction>.Filter;
+            var transactionFilter = !string.IsNullOrWhiteSpace(customerId)
+                ? transactionFilterBuilder.Eq(x => x.customerId, customerId)
+                : transactionFilterBuilder.Empty;
+
+            var transactionDocs = await _apiDocumentDbContext.CustomerDebtTransactions
+                .Find(transactionFilter)
                 .ToListAsync();
 
-            var transactions = customers
-                .SelectMany(customer => (customer.debtTransactions ?? new List<DebtTransactionRecord>())
-                    .Select(t => new DebtTransactionListItem
+            var transactionCustomerIds = transactionDocs
+                .Select(x => x.customerId)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            var customers = transactionCustomerIds.Count == 0
+                ? new List<CustomerAccount>()
+                : await _apiDocumentDbContext.CustomerAccounts
+                    .Find(x => transactionCustomerIds.Contains(x.Id))
+                    .ToListAsync();
+            var customerLookup = customers
+                .Where(x => !string.IsNullOrWhiteSpace(x.Id))
+                .ToDictionary(x => x.Id, x => x);
+
+            var transactionIdSet = new HashSet<string>(
+                transactionDocs
+                    .Where(x => !string.IsNullOrWhiteSpace(x.id))
+                    .Select(x => x.id),
+                StringComparer.Ordinal);
+            var legacyCustomerFilter = !string.IsNullOrWhiteSpace(customerId)
+                ? Builders<CustomerAccount>.Filter.Eq(x => x.Id, customerId)
+                : Builders<CustomerAccount>.Filter.SizeGt(x => x.debtTransactions, 0);
+            var legacyCustomers = await _apiDocumentDbContext.CustomerAccounts
+                .Find(legacyCustomerFilter)
+                .Project(x => new CustomerAccount
+                {
+                    Id = x.Id,
+                    code = x.code,
+                    name = x.name,
+                    debtTransactions = x.debtTransactions
+                })
+                .ToListAsync();
+
+            var legacyTransactionDocs = legacyCustomers
+                .Where(c => c.debtTransactions != null)
+                .SelectMany(c => c.debtTransactions
+                    .Where(t => !string.IsNullOrWhiteSpace(t.id) && !transactionIdSet.Contains(t.id))
+                    .Select(t => new CustomerDebtTransaction
                     {
                         id = t.id,
-                        customerId = customer.Id,
-                        customerCode = customer.code,
-                        customerName = customer.name,
+                        customerId = c.Id,
                         transactionType = t.transactionType,
                         amount = t.amount,
                         transactionAt = t.transactionAt,
@@ -657,6 +823,38 @@ namespace ApiPlugin.Controllers
                         createdAt = t.createdAt,
                         createdBy = t.createdBy,
                     }))
+                .ToList();
+
+            transactionDocs.AddRange(legacyTransactionDocs);
+
+            foreach (var legacyCustomer in legacyCustomers)
+            {
+                if (string.IsNullOrWhiteSpace(legacyCustomer.Id) || customerLookup.ContainsKey(legacyCustomer.Id))
+                {
+                    continue;
+                }
+
+                customerLookup[legacyCustomer.Id] = legacyCustomer;
+            }
+
+            var transactions = transactionDocs
+                .Select(t =>
+                {
+                    customerLookup.TryGetValue(t.customerId ?? string.Empty, out var customer);
+                    return new DebtTransactionListItem
+                    {
+                        id = t.id,
+                        customerId = t.customerId,
+                        customerCode = customer?.code,
+                        customerName = customer?.name,
+                        transactionType = t.transactionType,
+                        amount = t.amount,
+                        transactionAt = t.transactionAt,
+                        note = t.note,
+                        createdAt = t.createdAt,
+                        createdBy = t.createdBy,
+                    };
+                })
                 .ToList();
 
             if (!string.IsNullOrWhiteSpace(search))
@@ -711,7 +909,14 @@ namespace ApiPlugin.Controllers
                 return NotFound("Customer not found");
             }
 
-            var fileBytes = BuildDebtCustomerExcelFile(customer);
+            await MigrateLegacyDataForCustomerAsync(customer, true);
+
+            var transactions = await _apiDocumentDbContext.CustomerDebtTransactions
+                .Find(x => x.customerId == customerId)
+                .SortBy(x => x.transactionAt)
+                .ToListAsync();
+
+            var fileBytes = BuildDebtCustomerExcelFile(customer, transactions);
             var safeCode = string.IsNullOrWhiteSpace(customer.code)
                 ? "khach-hang"
                 : string.Join("-", customer.code.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
@@ -771,7 +976,7 @@ namespace ApiPlugin.Controllers
                 .ToListAsync();
         }
 
-        private byte[] BuildDebtCustomerExcelFile(CustomerAccount customer)
+        private byte[] BuildDebtCustomerExcelFile(CustomerAccount customer, List<CustomerDebtTransaction> transactions)
         {
             ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
 
@@ -789,9 +994,7 @@ namespace ApiPlugin.Controllers
             worksheet.Column(6).Width = 15;
             worksheet.Column(7).Width = 26;
 
-            var transactions = (customer.debtTransactions ?? new List<DebtTransactionRecord>())
-                .OrderBy(x => x.transactionAt)
-                .ToList();
+            transactions ??= new List<CustomerDebtTransaction>();
             var ledgerAccountCode = ResolveLedgerAccountCode(customer);
             var ledgerTitle = ledgerAccountCode == "131"
                 ? "SỔ CHI TIẾT CÔNG NỢ PHẢI THU"
@@ -974,7 +1177,7 @@ namespace ApiPlugin.Controllers
             return package.GetAsByteArray();
         }
 
-        private string BuildPeriodRangeText(List<DebtTransactionRecord> transactions)
+        private string BuildPeriodRangeText(List<CustomerDebtTransaction> transactions)
         {
             if (transactions == null || transactions.Count == 0)
             {
@@ -1065,8 +1268,9 @@ namespace ApiPlugin.Controllers
             return user.Id ?? "system";
         }
 
-        private void AddAuditLog(
-            CustomerAccount customer,
+        private CustomerAuditLogEntry CreateAuditLogEntry(
+            string customerId,
+            string transactionId,
             string action,
             string field,
             string oldValue,
@@ -1074,10 +1278,11 @@ namespace ApiPlugin.Controllers
             string changedBy,
             string note)
         {
-            customer.auditLogs ??= new List<CustomerAuditLog>();
-            customer.auditLogs.Add(new CustomerAuditLog
+            return new CustomerAuditLogEntry
             {
                 id = Guid.NewGuid().ToString("N"),
+                customerId = customerId,
+                transactionId = transactionId,
                 action = action,
                 field = field,
                 oldValue = oldValue,
@@ -1085,7 +1290,151 @@ namespace ApiPlugin.Controllers
                 changedAt = DateTime.UtcNow,
                 changedBy = changedBy,
                 note = note,
-            });
+            };
+        }
+
+        private async Task AppendCustomerAuditLogAsync(CustomerAuditLogEntry entry)
+        {
+            if (entry == null || string.IsNullOrWhiteSpace(entry.customerId))
+            {
+                return;
+            }
+
+            await _apiDocumentDbContext.CustomerAuditLogs.InsertOneAsync(entry);
+        }
+
+        private async Task AppendCustomerAuditLogsAsync(IEnumerable<CustomerAuditLogEntry> entries)
+        {
+            var materialized = entries
+                .Where(x => x != null && !string.IsNullOrWhiteSpace(x.customerId))
+                .ToList();
+
+            if (materialized.Count == 0)
+            {
+                return;
+            }
+
+            await _apiDocumentDbContext.CustomerAuditLogs.InsertManyAsync(materialized);
+        }
+
+        private async Task<(int migratedTransactions, int migratedAuditLogs, bool clearedLegacy)> MigrateLegacyDataForCustomerAsync(CustomerAccount customer, bool clearLegacy)
+        {
+            if (customer == null || string.IsNullOrWhiteSpace(customer.Id))
+            {
+                return (0, 0, false);
+            }
+
+            var legacyTransactions = (customer.debtTransactions ?? new List<DebtTransactionRecord>())
+                .Where(x => !string.IsNullOrWhiteSpace(x.id))
+                .ToList();
+            var legacyAuditLogs = (customer.auditLogs ?? new List<CustomerAuditLog>())
+                .Where(x => !string.IsNullOrWhiteSpace(x.id))
+                .ToList();
+
+            var migratedTransactions = 0;
+            var migratedAuditLogs = 0;
+
+            if (legacyTransactions.Count > 0)
+            {
+                var existingTransactionIds = await _apiDocumentDbContext.CustomerDebtTransactions
+                    .Find(x => x.customerId == customer.Id)
+                    .Project(x => x.id)
+                    .ToListAsync();
+                var existingTransactionIdSet = new HashSet<string>(
+                    existingTransactionIds.Where(x => !string.IsNullOrWhiteSpace(x)),
+                    StringComparer.Ordinal);
+
+                var insertTransactions = legacyTransactions
+                    .Where(x => !existingTransactionIdSet.Contains(x.id))
+                    .Select(x => new CustomerDebtTransaction
+                    {
+                        id = x.id,
+                        customerId = customer.Id,
+                        transactionType = x.transactionType,
+                        amount = x.amount,
+                        transactionAt = x.transactionAt,
+                        note = x.note,
+                        createdAt = x.createdAt,
+                        createdBy = x.createdBy,
+                    })
+                    .ToList();
+
+                if (insertTransactions.Count > 0)
+                {
+                    await _apiDocumentDbContext.CustomerDebtTransactions.InsertManyAsync(insertTransactions);
+                    migratedTransactions = insertTransactions.Count;
+                }
+            }
+
+            if (legacyAuditLogs.Count > 0)
+            {
+                var existingAuditIds = await _apiDocumentDbContext.CustomerAuditLogs
+                    .Find(x => x.customerId == customer.Id)
+                    .Project(x => x.id)
+                    .ToListAsync();
+                var existingAuditIdSet = new HashSet<string>(
+                    existingAuditIds.Where(x => !string.IsNullOrWhiteSpace(x)),
+                    StringComparer.Ordinal);
+
+                var insertAuditLogs = legacyAuditLogs
+                    .Where(x => !existingAuditIdSet.Contains(x.id))
+                    .Select(x => new CustomerAuditLogEntry
+                    {
+                        id = x.id,
+                        customerId = customer.Id,
+                        transactionId = ExtractTransactionIdFromField(x.field),
+                        action = x.action,
+                        field = x.field,
+                        oldValue = x.oldValue,
+                        newValue = x.newValue,
+                        changedAt = x.changedAt,
+                        changedBy = x.changedBy,
+                        note = x.note,
+                    })
+                    .ToList();
+
+                if (insertAuditLogs.Count > 0)
+                {
+                    await _apiDocumentDbContext.CustomerAuditLogs.InsertManyAsync(insertAuditLogs);
+                    migratedAuditLogs = insertAuditLogs.Count;
+                }
+            }
+
+            var hasLegacyData = legacyTransactions.Count > 0 || legacyAuditLogs.Count > 0;
+            if (!clearLegacy || !hasLegacyData)
+            {
+                return (migratedTransactions, migratedAuditLogs, false);
+            }
+
+            customer.debtTransactions = new List<DebtTransactionRecord>();
+            customer.auditLogs = new List<CustomerAuditLog>();
+            var customerFilter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, customer.Id);
+            await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(customerFilter, customer);
+
+            return (migratedTransactions, migratedAuditLogs, true);
+        }
+
+        private string ExtractTransactionIdFromField(string field)
+        {
+            if (string.IsNullOrWhiteSpace(field))
+            {
+                return null;
+            }
+
+            var prefix = "debtTransaction.";
+            if (!field.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var remaining = field.Substring(prefix.Length);
+            var separatorIndex = remaining.IndexOf('.');
+            if (separatorIndex <= 0)
+            {
+                return null;
+            }
+
+            return remaining.Substring(0, separatorIndex);
         }
 
         private List<CustomerFieldChange> BuildCustomerChanges(CustomerAccount oldData, CustomerAccount newData)

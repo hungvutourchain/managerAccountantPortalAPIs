@@ -165,4 +165,92 @@ namespace B2BAdmin.ApiDocument.Domains.Models
         [JsonPropertyName("note")]
         public string? note { get; set; }
     }
+
+    [BsonIgnoreExtraElements]
+    public class CustomerDebtTransaction
+    {
+        [BsonElement("id")]
+        [JsonPropertyName("id")]
+        public string? id { get; set; }
+
+        [BsonElement("customerId")]
+        [JsonPropertyName("customerId")]
+        public string? customerId { get; set; }
+
+        [BsonElement("transactionType")]
+        [JsonPropertyName("transactionType")]
+        public string? transactionType { get; set; }
+
+        [BsonElement("amount")]
+        [JsonPropertyName("amount")]
+        public decimal amount { get; set; }
+
+        [BsonElement("transactionAt")]
+        [JsonPropertyName("transactionAt")]
+        public DateTime transactionAt { get; set; }
+
+        [BsonElement("note")]
+        [JsonPropertyName("note")]
+        public string? note { get; set; }
+
+        [BsonElement("createdAt")]
+        [JsonPropertyName("createdAt")]
+        public DateTime createdAt { get; set; } = DateTime.UtcNow;
+
+        [BsonElement("createdBy")]
+        [JsonPropertyName("createdBy")]
+        public string? createdBy { get; set; }
+
+        [BsonElement("updatedAt")]
+        [JsonPropertyName("updatedAt")]
+        public DateTime? updatedAt { get; set; }
+
+        [BsonElement("updatedBy")]
+        [JsonPropertyName("updatedBy")]
+        public string? updatedBy { get; set; }
+    }
+
+    [BsonIgnoreExtraElements]
+    public class CustomerAuditLogEntry
+    {
+        [BsonElement("id")]
+        [JsonPropertyName("id")]
+        public string? id { get; set; }
+
+        [BsonElement("customerId")]
+        [JsonPropertyName("customerId")]
+        public string? customerId { get; set; }
+
+        [BsonElement("transactionId")]
+        [JsonPropertyName("transactionId")]
+        public string? transactionId { get; set; }
+
+        [BsonElement("action")]
+        [JsonPropertyName("action")]
+        public string? action { get; set; }
+
+        [BsonElement("field")]
+        [JsonPropertyName("field")]
+        public string? field { get; set; }
+
+        [BsonElement("oldValue")]
+        [JsonPropertyName("oldValue")]
+        public string? oldValue { get; set; }
+
+        [BsonElement("newValue")]
+        [JsonPropertyName("newValue")]
+        public string? newValue { get; set; }
+
+        [BsonElement("changedAt")]
+        [JsonPropertyName("changedAt")]
+        public DateTime changedAt { get; set; } = DateTime.UtcNow;
+
+        [BsonElement("changedBy")]
+        [JsonPropertyName("changedBy")]
+        public string? changedBy { get; set; }
+
+        [BsonElement("note")]
+        [JsonPropertyName("note")]
+        public string? note { get; set; }
+    }
 }
