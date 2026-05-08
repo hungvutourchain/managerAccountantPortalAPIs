@@ -2,12 +2,15 @@ using System;
 using System.IdentityModel.Tokens.Jwt;
 using System.Linq;
 using System.Text;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using B2BAdmin.ApiDocument.Infrastructure;
 using B2BAdmin.ApiDocument.Services;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
+using MongoDB.Driver;
 
 
 namespace B2BAdmin.ApiDocument.API.Controllers
@@ -20,13 +23,15 @@ namespace B2BAdmin.ApiDocument.API.Controllers
         private readonly IMediator _mediator;
         private readonly IConfiguration _configuration;
         private readonly IUserServiceDocument _userService;
+        private readonly ApiDocumentDbContext _db;
 
         public AuthenticateController(IMediator mediator, IConfiguration configuration,
-        IUserServiceDocument userService)
+        IUserServiceDocument userService, ApiDocumentDbContext db)
         {
             _mediator = mediator;
             _configuration = configuration;
             _userService = userService;
+            _db = db;
         }
         [HttpPost("authenticate")]
         public async Task<IActionResult> AuthenticateAsync([FromBody] AuthenticateApiDocumentCommand request)
@@ -57,5 +62,59 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             var rs = _userService.GetByIdDocument(userId).Result;
             return Ok(rs);
         }
+
+        [DocumentAuthorize]
+        [HttpPut("info")]
+        public async Task<IActionResult> UpdateUserInfoAsync([FromBody] UpdateUserInfoRequest request, [FromHeader] string Authorization)
+        {
+            if (request == null)
+            {
+                return BadRequest(new { message = "Request body is required" });
+            }
+
+            string userId;
+            try
+            {
+                var token = Authorization.Substring("Bearer ".Length);
+                var tokenHandler = new JwtSecurityTokenHandler();
+                var key = Encoding.ASCII.GetBytes(_configuration["JwtSecret"]);
+                tokenHandler.ValidateToken(token, new TokenValidationParameters
+                {
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new SymmetricSecurityKey(key),
+                    ValidateIssuer = false,
+                    ValidateAudience = false,
+                    ClockSkew = TimeSpan.Zero
+                }, out SecurityToken validatedToken);
+
+                var jwtToken = (JwtSecurityToken)validatedToken;
+                userId = jwtToken.Claims.First(x => x.Type == "Id").Value;
+            }
+            catch
+            {
+                return Unauthorized(new { message = "Invalid token" });
+            }
+
+            var update = Builders<B2BAdmin.ApiDocument.Domains.Models.UserAdmin>.Update
+                .Set(u => u.TwoFAGoogle, request.TwoFAGoogle)
+                .Set(u => u.TwoFactorEnabled, request.TwoFactorEnabled)
+                .Set(u => u.SecretKey, request.SecretKey ?? string.Empty);
+
+            await _db.AdminUsers.UpdateOneAsync(u => u.Id == userId, update);
+
+            return Ok(new { success = true });
+        }
+    }
+
+    public class UpdateUserInfoRequest
+    {
+        [JsonPropertyName("twoFAGoogle")]
+        public bool TwoFAGoogle { get; set; }
+
+        [JsonPropertyName("twoFactorEnabled")]
+        public bool TwoFactorEnabled { get; set; }
+
+        [JsonPropertyName("SecretKey")]
+        public string? SecretKey { get; set; }
     }
 }
