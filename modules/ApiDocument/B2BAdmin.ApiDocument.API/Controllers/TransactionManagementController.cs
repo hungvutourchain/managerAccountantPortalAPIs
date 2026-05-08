@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Threading;
 using B2BAdmin.ApiDocument.API.Services;
@@ -397,17 +400,15 @@ namespace B2BAdmin.ApiDocument.API.Controllers
 
             transaction.attachments ??= new List<DebtTransactionAttachment>();
             var actor = GetCurrentActor();
-            var attachmentDirectory = EnsureTransactionAttachmentDirectory(transactionId);
+            var uploadedAt = DateTime.UtcNow;
+            var attachmentDirectory = EnsureTransactionAttachmentDirectory(transactionId, uploadedAt, out var relativeDirectory);
             var addedAttachments = new List<DebtTransactionAttachment>();
 
             foreach (var file in uploadFiles)
             {
                 var attachmentId = Guid.NewGuid().ToString("N");
                 var safeOriginalName = GetSafeOriginalFileName(file.FileName);
-                var extension = Path.GetExtension(safeOriginalName);
-                var storedFileName = string.IsNullOrWhiteSpace(extension)
-                    ? attachmentId
-                    : $"{attachmentId}{extension}";
+                var storedFileName = BuildStoredFileName(safeOriginalName, attachmentId);
                 var absolutePath = Path.Combine(attachmentDirectory, storedFileName);
 
                 await using (var stream = new FileStream(absolutePath, FileMode.Create, FileAccess.Write, FileShare.None))
@@ -420,10 +421,10 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                     id = attachmentId,
                     fileName = safeOriginalName,
                     storedFileName = storedFileName,
-                    relativePath = BuildTransactionAttachmentRelativePath(transactionId, storedFileName),
+                    relativePath = BuildTransactionAttachmentRelativePath(relativeDirectory, storedFileName),
                     contentType = string.IsNullOrWhiteSpace(file.ContentType) ? "application/octet-stream" : file.ContentType,
                     size = file.Length,
-                    uploadedAt = DateTime.UtcNow,
+                    uploadedAt = uploadedAt,
                     uploadedBy = actor,
                 };
 
@@ -1108,23 +1109,39 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             return value.HasValue ? value.Value.ToString("o") : null;
         }
 
-        private string EnsureTransactionAttachmentDirectory(string transactionId)
+        private string EnsureTransactionAttachmentDirectory(string transactionId, DateTime uploadedAt, out string relativeDirectory)
         {
-            var path = Path.Combine(GetDebtTransactionAttachmentRootPath(), transactionId);
+            var safeTransactionId = SanitizePathSegment(transactionId, "transaction");
+            relativeDirectory = Path.Combine(
+                uploadedAt.ToString("yyyy"),
+                uploadedAt.ToString("MM"),
+                uploadedAt.ToString("dd"),
+                safeTransactionId)
+                .Replace("\\", "/");
+
+            var path = Path.Combine(GetDebtTransactionAttachmentRootPath(), relativeDirectory.Replace("/", Path.DirectorySeparatorChar.ToString()));
             Directory.CreateDirectory(path);
             return path;
         }
 
-        private string BuildTransactionAttachmentRelativePath(string transactionId, string storedFileName)
+        private string EnsureLegacyTransactionAttachmentDirectory(string transactionId)
         {
-            return Path.Combine(transactionId, storedFileName).Replace("\\", "/");
+            var safeTransactionId = SanitizePathSegment(transactionId, "transaction");
+            var path = Path.Combine(GetDebtTransactionAttachmentRootPath(), safeTransactionId);
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        private string BuildTransactionAttachmentRelativePath(string relativeDirectory, string storedFileName)
+        {
+            return Path.Combine(relativeDirectory ?? string.Empty, storedFileName ?? string.Empty).Replace("\\", "/");
         }
 
         private string ResolveAttachmentAbsolutePath(string transactionId, DebtTransactionAttachment attachment)
         {
             if (attachment == null)
             {
-                return Path.Combine(EnsureTransactionAttachmentDirectory(transactionId), string.Empty);
+                return Path.Combine(EnsureLegacyTransactionAttachmentDirectory(transactionId), string.Empty);
             }
 
             if (!string.IsNullOrWhiteSpace(attachment?.relativePath))
@@ -1146,7 +1163,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 return Path.Combine(GetDebtTransactionAttachmentRootPath(), normalizedRelativePath);
             }
 
-            return Path.Combine(EnsureTransactionAttachmentDirectory(transactionId), attachment?.storedFileName ?? string.Empty);
+            return Path.Combine(EnsureLegacyTransactionAttachmentDirectory(transactionId), attachment?.storedFileName ?? string.Empty);
         }
 
         private string GetDebtTransactionAttachmentRootPath()
@@ -1169,6 +1186,73 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             var invalidChars = Path.GetInvalidFileNameChars();
             var sanitized = new string(source.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray()).Trim();
             return string.IsNullOrWhiteSpace(sanitized) ? "upload.bin" : sanitized;
+        }
+
+        private string BuildStoredFileName(string originalFileName, string uniqueId)
+        {
+            var safeOriginalName = GetSafeOriginalFileName(originalFileName);
+            var extension = SanitizeFileExtension(Path.GetExtension(safeOriginalName) ?? string.Empty);
+            var baseName = Path.GetFileNameWithoutExtension(safeOriginalName) ?? "file";
+
+            var normalized = baseName.Normalize(NormalizationForm.FormD);
+            var builder = new StringBuilder();
+            foreach (var ch in normalized)
+            {
+                if (CharUnicodeInfo.GetUnicodeCategory(ch) != UnicodeCategory.NonSpacingMark)
+                {
+                    builder.Append(ch);
+                }
+            }
+
+            var withoutAccent = builder.ToString().Normalize(NormalizationForm.FormC).ToLowerInvariant();
+            var alphaNumericSlug = Regex.Replace(withoutAccent, "[^a-z0-9]+", "-")
+                .Trim('-');
+            if (string.IsNullOrWhiteSpace(alphaNumericSlug))
+            {
+                alphaNumericSlug = "file";
+            }
+
+            const int maxSlugLength = 80;
+            if (alphaNumericSlug.Length > maxSlugLength)
+            {
+                alphaNumericSlug = alphaNumericSlug.Substring(0, maxSlugLength).Trim('-');
+                if (string.IsNullOrWhiteSpace(alphaNumericSlug))
+                {
+                    alphaNumericSlug = "file";
+                }
+            }
+
+            var shortUnique = (uniqueId ?? Guid.NewGuid().ToString("N")).Trim().ToLowerInvariant();
+            return $"{alphaNumericSlug}-{shortUnique}{extension}";
+        }
+
+        private string SanitizePathSegment(string value, string fallback)
+        {
+            var segment = string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+            var cleaned = Regex.Replace(segment, "[^a-zA-Z0-9._-]+", "-").Trim('-');
+            return string.IsNullOrWhiteSpace(cleaned) ? fallback : cleaned;
+        }
+
+        private string SanitizeFileExtension(string extension)
+        {
+            if (string.IsNullOrWhiteSpace(extension))
+            {
+                return string.Empty;
+            }
+
+            var lowered = extension.Trim().ToLowerInvariant();
+            if (!lowered.StartsWith('.'))
+            {
+                lowered = $".{lowered}";
+            }
+
+            var cleaned = Regex.Replace(lowered, "[^a-z0-9.]", string.Empty);
+            if (cleaned == ".")
+            {
+                return string.Empty;
+            }
+
+            return cleaned;
         }
 
         private bool ContainsText(string source, string keyword)
