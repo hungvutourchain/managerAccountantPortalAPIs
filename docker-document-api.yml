@@ -30,6 +30,9 @@ services:
       Gemini__TimeoutSeconds: "45"
       Gemini__DefaultLanguage: "Vietnamese"
       Gemini__SystemPrompt: "You are a debt analysis assistant for an accounting portal. Answer in Vietnamese by default unless the user asks for English. Use only the provided debt data."
+      AttachmentStorage__DebtTransactionRootPath: /host/debt-transaction-files
+    volumes:
+      - /host/debt-transaction-files:/host/debt-transaction-files
     networks:
       - general
 

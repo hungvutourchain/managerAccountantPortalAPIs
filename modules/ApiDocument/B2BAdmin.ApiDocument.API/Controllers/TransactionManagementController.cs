@@ -8,7 +8,10 @@ using System.Threading;
 using B2BAdmin.ApiDocument.API.Services;
 using B2BAdmin.ApiDocument.Domains.Models;
 using B2BAdmin.ApiDocument.Infrastructure;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 using MongoDB.Driver;
 using OfficeOpenXml;
 using OfficeOpenXml.Style;
@@ -21,11 +24,15 @@ namespace B2BAdmin.ApiDocument.API.Controllers
     {
         private readonly ApiDocumentDbContext _apiDocumentDbContext;
         private readonly IDebtAiService _debtAiService;
+        private readonly IHostingEnvironment _webHostEnvironment;
+        private readonly IConfiguration _configuration;
 
-        public TransactionManagementController(ApiDocumentDbContext apiDocumentDbContext, IDebtAiService debtAiService)
+        public TransactionManagementController(ApiDocumentDbContext apiDocumentDbContext, IDebtAiService debtAiService, IHostingEnvironment webHostEnvironment, IConfiguration configuration)
         {
             _apiDocumentDbContext = apiDocumentDbContext;
             _debtAiService = debtAiService;
+            _webHostEnvironment = webHostEnvironment;
+            _configuration = configuration;
         }
 
         [HttpPost("transactions")]
@@ -34,6 +41,11 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             if (payload == null || string.IsNullOrWhiteSpace(payload.customerId))
             {
                 return BadRequest("Invalid payload");
+            }
+
+            if (string.IsNullOrWhiteSpace(payload.contractCode))
+            {
+                return BadRequest("contractCode is required");
             }
 
             if (payload.amount <= 0)
@@ -74,9 +86,11 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 transactionType = transactionType,
                 amount = payload.amount,
                 transactionAt = transactionAt,
+                contractCode = NormalizeText(payload.contractCode),
                 note = payload.note,
                 createdAt = DateTime.UtcNow,
                 createdBy = actor,
+                attachments = new List<DebtTransactionAttachment>(),
             };
 
             await _apiDocumentDbContext.CustomerDebtTransactions.InsertOneAsync(transaction);
@@ -101,6 +115,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 CreateAuditLogEntry(customer.Id, transaction.id, "transaction-create", $"debtTransaction.{transaction.id}.transactionType", null, transaction.transactionType, actor, payload.note),
                 CreateAuditLogEntry(customer.Id, transaction.id, "transaction-create", $"debtTransaction.{transaction.id}.amount", null, transaction.amount.ToString(), actor, payload.note),
                 CreateAuditLogEntry(customer.Id, transaction.id, "transaction-create", $"debtTransaction.{transaction.id}.transactionAt", null, FormatDateTime(transaction.transactionAt), actor, payload.note),
+                CreateAuditLogEntry(customer.Id, transaction.id, "transaction-create", $"debtTransaction.{transaction.id}.contractCode", null, NormalizeText(transaction.contractCode), actor, payload.note),
                 CreateAuditLogEntry(customer.Id, transaction.id, "transaction-create", $"debtTransaction.{transaction.id}.note", null, NormalizeText(transaction.note), actor, payload.note),
                 CreateAuditLogEntry(customer.Id, null, "transaction", "debtTransactions.count", oldTransactionCount.ToString(), (oldTransactionCount + 1).ToString(), actor, payload.note),
             };
@@ -131,7 +146,9 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                     transactionType = transaction.transactionType,
                     amount = transaction.amount,
                     transactionAt = transaction.transactionAt,
+                    contractCode = transaction.contractCode,
                     note = transaction.note,
+                    attachments = transaction.attachments ?? new List<DebtTransactionAttachment>(),
                     createdAt = transaction.createdAt,
                     createdBy = transaction.createdBy,
                 }
@@ -149,6 +166,11 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             if (payload == null || payload.amount <= 0)
             {
                 return BadRequest("Invalid payload");
+            }
+
+            if (string.IsNullOrWhiteSpace(payload.contractCode))
+            {
+                return BadRequest("contractCode is required");
             }
 
             var transactionType = (payload.transactionType ?? string.Empty).Trim().ToLowerInvariant();
@@ -209,6 +231,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             var oldType = transaction.transactionType;
             var oldAmount = transaction.amount;
             var oldTransactionAt = transaction.transactionAt;
+            var oldContractCode = transaction.contractCode;
             var oldNote = transaction.note;
             var oldCustomerId = sourceCustomerId;
 
@@ -244,6 +267,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             transaction.transactionType = transactionType;
             transaction.amount = payload.amount;
             transaction.transactionAt = nextTransactionAt;
+            transaction.contractCode = NormalizeText(payload.contractCode);
             transaction.note = payload.note;
 
             var sourceOtherTransactionDates = await _apiDocumentDbContext.CustomerDebtTransactions
@@ -299,6 +323,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 CreateAuditLogEntry(targetCustomer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.transactionType", NormalizeText(oldType), NormalizeText(transaction.transactionType), actor, payload.note),
                 CreateAuditLogEntry(targetCustomer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.amount", oldAmount.ToString(), transaction.amount.ToString(), actor, payload.note),
                 CreateAuditLogEntry(targetCustomer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.transactionAt", FormatDateTime(oldTransactionAt), FormatDateTime(transaction.transactionAt), actor, payload.note),
+                CreateAuditLogEntry(targetCustomer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.contractCode", NormalizeText(oldContractCode), NormalizeText(transaction.contractCode), actor, payload.note),
                 CreateAuditLogEntry(targetCustomer.Id, transactionId, "transaction-update", $"debtTransaction.{transactionId}.note", NormalizeText(oldNote), NormalizeText(transaction.note), actor, payload.note),
             };
 
@@ -345,6 +370,177 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 netBalance = GetNetBalance(targetCustomer),
                 transaction
             });
+        }
+
+        [HttpPost("transactions/{transactionId}/attachments")]
+        public async Task<IActionResult> UploadDebtTransactionAttachmentsAsync(string transactionId, [FromForm] List<IFormFile> files)
+        {
+            if (string.IsNullOrWhiteSpace(transactionId))
+            {
+                return BadRequest("Invalid transactionId");
+            }
+
+            var uploadFiles = (files ?? new List<IFormFile>())
+                .Where(x => x != null && x.Length > 0)
+                .ToList();
+            if (uploadFiles.Count == 0)
+            {
+                return BadRequest("No files uploaded");
+            }
+
+            var transactionFilter = Builders<CustomerDebtTransaction>.Filter.Eq(x => x.id, transactionId);
+            var transaction = await _apiDocumentDbContext.CustomerDebtTransactions.Find(transactionFilter).FirstOrDefaultAsync();
+            if (transaction == null || transaction.isDeleted)
+            {
+                return NotFound("Transaction not found");
+            }
+
+            transaction.attachments ??= new List<DebtTransactionAttachment>();
+            var actor = GetCurrentActor();
+            var attachmentDirectory = EnsureTransactionAttachmentDirectory(transactionId);
+            var addedAttachments = new List<DebtTransactionAttachment>();
+
+            foreach (var file in uploadFiles)
+            {
+                var attachmentId = Guid.NewGuid().ToString("N");
+                var safeOriginalName = GetSafeOriginalFileName(file.FileName);
+                var extension = Path.GetExtension(safeOriginalName);
+                var storedFileName = string.IsNullOrWhiteSpace(extension)
+                    ? attachmentId
+                    : $"{attachmentId}{extension}";
+                var absolutePath = Path.Combine(attachmentDirectory, storedFileName);
+
+                await using (var stream = new FileStream(absolutePath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    await file.CopyToAsync(stream);
+                }
+
+                var attachment = new DebtTransactionAttachment
+                {
+                    id = attachmentId,
+                    fileName = safeOriginalName,
+                    storedFileName = storedFileName,
+                    relativePath = BuildTransactionAttachmentRelativePath(transactionId, storedFileName),
+                    contentType = string.IsNullOrWhiteSpace(file.ContentType) ? "application/octet-stream" : file.ContentType,
+                    size = file.Length,
+                    uploadedAt = DateTime.UtcNow,
+                    uploadedBy = actor,
+                };
+
+                transaction.attachments.Add(attachment);
+                addedAttachments.Add(attachment);
+            }
+
+            transaction.updatedAt = DateTime.UtcNow;
+            transaction.updatedBy = actor;
+            await _apiDocumentDbContext.CustomerDebtTransactions.ReplaceOneAsync(transactionFilter, transaction);
+
+            await AppendCustomerAuditLogsAsync(addedAttachments.Select(attachment =>
+                CreateAuditLogEntry(
+                    transaction.customerId,
+                    transaction.id,
+                    "transaction-update",
+                    $"debtTransaction.{transaction.id}.attachment.{attachment.id}",
+                    null,
+                    attachment.fileName,
+                    actor,
+                    $"Uploaded file: {attachment.fileName}")));
+
+            return Ok(new
+            {
+                success = true,
+                attachments = transaction.attachments
+            });
+        }
+
+        [HttpDelete("transactions/{transactionId}/attachments/{attachmentId}")]
+        public async Task<IActionResult> DeleteDebtTransactionAttachmentAsync(string transactionId, string attachmentId)
+        {
+            if (string.IsNullOrWhiteSpace(transactionId) || string.IsNullOrWhiteSpace(attachmentId))
+            {
+                return BadRequest("Invalid request");
+            }
+
+            var transactionFilter = Builders<CustomerDebtTransaction>.Filter.Eq(x => x.id, transactionId);
+            var transaction = await _apiDocumentDbContext.CustomerDebtTransactions.Find(transactionFilter).FirstOrDefaultAsync();
+            if (transaction == null || transaction.isDeleted)
+            {
+                return NotFound("Transaction not found");
+            }
+
+            transaction.attachments ??= new List<DebtTransactionAttachment>();
+            var attachment = transaction.attachments.FirstOrDefault(x => string.Equals(x.id, attachmentId, StringComparison.Ordinal));
+            if (attachment == null)
+            {
+                return NotFound("Attachment not found");
+            }
+
+            var filePath = ResolveAttachmentAbsolutePath(transactionId, attachment);
+            if (System.IO.File.Exists(filePath))
+            {
+                System.IO.File.Delete(filePath);
+            }
+
+            transaction.attachments = transaction.attachments
+                .Where(x => !string.Equals(x.id, attachmentId, StringComparison.Ordinal))
+                .ToList();
+            transaction.updatedAt = DateTime.UtcNow;
+            transaction.updatedBy = GetCurrentActor();
+
+            await _apiDocumentDbContext.CustomerDebtTransactions.ReplaceOneAsync(transactionFilter, transaction);
+            await AppendCustomerAuditLogsAsync(new[]
+            {
+                CreateAuditLogEntry(
+                    transaction.customerId,
+                    transaction.id,
+                    "transaction-update",
+                    $"debtTransaction.{transaction.id}.attachment.{attachment.id}",
+                    attachment.fileName,
+                    null,
+                    transaction.updatedBy,
+                    $"Deleted file: {attachment.fileName}")
+            });
+
+            return Ok(new
+            {
+                success = true,
+                attachments = transaction.attachments
+            });
+        }
+
+        [HttpGet("transactions/{transactionId}/attachments/{attachmentId}/download")]
+        public async Task<IActionResult> DownloadDebtTransactionAttachmentAsync(string transactionId, string attachmentId)
+        {
+            if (string.IsNullOrWhiteSpace(transactionId) || string.IsNullOrWhiteSpace(attachmentId))
+            {
+                return BadRequest("Invalid request");
+            }
+
+            var transaction = await _apiDocumentDbContext.CustomerDebtTransactions
+                .Find(x => x.id == transactionId && !x.isDeleted)
+                .FirstOrDefaultAsync();
+            if (transaction == null)
+            {
+                return NotFound("Transaction not found");
+            }
+
+            var attachment = (transaction.attachments ?? new List<DebtTransactionAttachment>())
+                .FirstOrDefault(x => string.Equals(x.id, attachmentId, StringComparison.Ordinal));
+            if (attachment == null)
+            {
+                return NotFound("Attachment not found");
+            }
+
+            var filePath = ResolveAttachmentAbsolutePath(transactionId, attachment);
+            if (!System.IO.File.Exists(filePath))
+            {
+                return NotFound("Attachment file not found");
+            }
+
+            return PhysicalFile(
+                filePath,
+                string.IsNullOrWhiteSpace(attachment.contentType) ? "application/octet-stream" : attachment.contentType,
+                attachment.fileName ?? "download.bin");
         }
 
         [HttpGet("transactions/{transactionId}/audit-logs")]
@@ -527,7 +723,9 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                         transactionType = t.transactionType,
                         amount = t.amount,
                         transactionAt = t.transactionAt,
+                        contractCode = t.contractCode,
                         note = t.note,
+                        attachments = (t.attachments ?? new List<DebtTransactionAttachment>()).ToList(),
                         createdAt = t.createdAt,
                         createdBy = t.createdBy,
                     };
@@ -541,6 +739,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                     .Where(x =>
                         ContainsText(x.customerCode, keyword)
                         || ContainsText(x.customerName, keyword)
+                        || ContainsText(x.contractCode, keyword)
                         || ContainsText(x.note, keyword)
                         || ContainsText(x.createdBy, keyword))
                     .ToList();
@@ -808,7 +1007,9 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                         transactionType = x.transactionType,
                         amount = x.amount,
                         transactionAt = x.transactionAt,
+                        contractCode = x.contractCode,
                         note = x.note,
+                        attachments = x.attachments ?? new List<DebtTransactionAttachment>(),
                         createdAt = x.createdAt,
                         createdBy = x.createdBy,
                     })
@@ -905,6 +1106,69 @@ namespace B2BAdmin.ApiDocument.API.Controllers
         private string FormatDateTime(DateTime? value)
         {
             return value.HasValue ? value.Value.ToString("o") : null;
+        }
+
+        private string EnsureTransactionAttachmentDirectory(string transactionId)
+        {
+            var path = Path.Combine(GetDebtTransactionAttachmentRootPath(), transactionId);
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        private string BuildTransactionAttachmentRelativePath(string transactionId, string storedFileName)
+        {
+            return Path.Combine(transactionId, storedFileName).Replace("\\", "/");
+        }
+
+        private string ResolveAttachmentAbsolutePath(string transactionId, DebtTransactionAttachment attachment)
+        {
+            if (attachment == null)
+            {
+                return Path.Combine(EnsureTransactionAttachmentDirectory(transactionId), string.Empty);
+            }
+
+            if (!string.IsNullOrWhiteSpace(attachment?.relativePath))
+            {
+                if (Path.IsPathRooted(attachment.relativePath))
+                {
+                    return attachment.relativePath;
+                }
+
+                var normalizedRelativePath = attachment.relativePath
+                    .Replace("/", Path.DirectorySeparatorChar.ToString())
+                    .TrimStart(Path.DirectorySeparatorChar);
+                var legacyPrefix = $"AppData{Path.DirectorySeparatorChar}DebtTransactionFiles{Path.DirectorySeparatorChar}";
+                if (normalizedRelativePath.StartsWith(legacyPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Path.Combine(_webHostEnvironment.ContentRootPath, normalizedRelativePath);
+                }
+
+                return Path.Combine(GetDebtTransactionAttachmentRootPath(), normalizedRelativePath);
+            }
+
+            return Path.Combine(EnsureTransactionAttachmentDirectory(transactionId), attachment?.storedFileName ?? string.Empty);
+        }
+
+        private string GetDebtTransactionAttachmentRootPath()
+        {
+            var configuredPath = _configuration["AttachmentStorage:DebtTransactionRootPath"];
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                var trimmed = configuredPath.Trim();
+                return Path.IsPathRooted(trimmed)
+                    ? trimmed
+                    : Path.GetFullPath(trimmed, _webHostEnvironment.ContentRootPath);
+            }
+
+            return Path.Combine(_webHostEnvironment.ContentRootPath, "AppData", "DebtTransactionFiles");
+        }
+
+        private string GetSafeOriginalFileName(string fileName)
+        {
+            var source = string.IsNullOrWhiteSpace(fileName) ? "upload.bin" : fileName.Trim();
+            var invalidChars = Path.GetInvalidFileNameChars();
+            var sanitized = new string(source.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray()).Trim();
+            return string.IsNullOrWhiteSpace(sanitized) ? "upload.bin" : sanitized;
         }
 
         private bool ContainsText(string source, string keyword)
@@ -1135,6 +1399,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             public string transactionType { get; set; }
             public decimal amount { get; set; }
             public DateTime? transactionAt { get; set; }
+            public string contractCode { get; set; }
             public string note { get; set; }
         }
 
@@ -1144,6 +1409,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             public string transactionType { get; set; }
             public decimal amount { get; set; }
             public DateTime? transactionAt { get; set; }
+            public string contractCode { get; set; }
             public string note { get; set; }
         }
 
@@ -1156,7 +1422,9 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             public string transactionType { get; set; }
             public decimal amount { get; set; }
             public DateTime transactionAt { get; set; }
+            public string contractCode { get; set; }
             public string note { get; set; }
+            public List<DebtTransactionAttachment> attachments { get; set; }
             public DateTime createdAt { get; set; }
             public string createdBy { get; set; }
         }

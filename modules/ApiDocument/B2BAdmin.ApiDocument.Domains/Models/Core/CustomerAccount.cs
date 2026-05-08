@@ -127,9 +127,17 @@ namespace B2BAdmin.ApiDocument.Domains.Models
         [JsonPropertyName("transactionAt")]
         public DateTime transactionAt { get; set; }
 
+        [BsonElement("contractCode")]
+        [JsonPropertyName("contractCode")]
+        public string? contractCode { get; set; }
+
         [BsonElement("note")]
         [JsonPropertyName("note")]
         public string? note { get; set; }
+
+        [BsonElement("attachments")]
+        [JsonPropertyName("attachments")]
+        public IList<DebtTransactionAttachment>? attachments { get; set; } = new List<DebtTransactionAttachment>();
 
         [BsonElement("createdAt")]
         [JsonPropertyName("createdAt")]
@@ -199,9 +207,17 @@ namespace B2BAdmin.ApiDocument.Domains.Models
         [JsonPropertyName("transactionAt")]
         public DateTime transactionAt { get; set; }
 
+        [BsonElement("contractCode")]
+        [JsonPropertyName("contractCode")]
+        public string? contractCode { get; set; }
+
         [BsonElement("note")]
         [JsonPropertyName("note")]
         public string? note { get; set; }
+
+        [BsonElement("attachments")]
+        [JsonPropertyName("attachments")]
+        public IList<DebtTransactionAttachment>? attachments { get; set; } = new List<DebtTransactionAttachment>();
 
         [BsonElement("createdAt")]
         [JsonPropertyName("createdAt")]
@@ -230,6 +246,42 @@ namespace B2BAdmin.ApiDocument.Domains.Models
         [BsonElement("deletedBy")]
         [JsonPropertyName("deletedBy")]
         public string? deletedBy { get; set; }
+    }
+
+    [BsonIgnoreExtraElements]
+    public class DebtTransactionAttachment
+    {
+        [BsonElement("id")]
+        [JsonPropertyName("id")]
+        public string? id { get; set; }
+
+        [BsonElement("fileName")]
+        [JsonPropertyName("fileName")]
+        public string? fileName { get; set; }
+
+        [BsonElement("storedFileName")]
+        [JsonPropertyName("storedFileName")]
+        public string? storedFileName { get; set; }
+
+        [BsonElement("relativePath")]
+        [JsonPropertyName("relativePath")]
+        public string? relativePath { get; set; }
+
+        [BsonElement("contentType")]
+        [JsonPropertyName("contentType")]
+        public string? contentType { get; set; }
+
+        [BsonElement("size")]
+        [JsonPropertyName("size")]
+        public long size { get; set; }
+
+        [BsonElement("uploadedAt")]
+        [JsonPropertyName("uploadedAt")]
+        public DateTime uploadedAt { get; set; } = DateTime.UtcNow;
+
+        [BsonElement("uploadedBy")]
+        [JsonPropertyName("uploadedBy")]
+        public string? uploadedBy { get; set; }
     }
 
     [BsonIgnoreExtraElements]
