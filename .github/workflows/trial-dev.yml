@@ -2,7 +2,7 @@ name: Deploy HELLOASIATRAVEL to Docker Swarm
 
 on:
   push:
-    branches: ["trialDev"] # Adjust as needed
+    branches: ["main"] # Adjust as needed
 # ghcr.io/hungvutourchain/tourchain-net/hoteltourportal:latest
 env:
   RESISTRY: ghcr.io
