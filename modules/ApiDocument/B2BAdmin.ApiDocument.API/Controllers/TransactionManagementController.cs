@@ -1113,9 +1113,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
         {
             var safeTransactionId = SanitizePathSegment(transactionId, "transaction");
             relativeDirectory = Path.Combine(
-                uploadedAt.ToString("yyyy"),
-                uploadedAt.ToString("MM"),
-                uploadedAt.ToString("dd"),
+                uploadedAt.ToString("ddMMMyyyy", System.Globalization.CultureInfo.InvariantCulture),
                 safeTransactionId)
                 .Replace("\\", "/");
 
