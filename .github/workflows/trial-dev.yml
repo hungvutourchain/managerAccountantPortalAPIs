@@ -6,7 +6,7 @@ on:
 # ghcr.io/hungvutourchain/tourchain-net/hoteltourportal:latest
 env:
   RESISTRY: ghcr.io
-  IMAGE_NAME7: hungvutourchain/netcoreapi:latest
+  IMAGE_NAME7: hungvutourchain/accountantportalapis:latest
   PAT: ${{secrets.PAT}}
   # IP: 152.42.245.213 
   IP: 159.89.193.175

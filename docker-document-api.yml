@@ -3,12 +3,12 @@ version: '3.4'
 services:
 
   b2badmin-api:
-    image: ghcr.io/hungvutourchain/netcoreapi:latest
+    image: ghcr.io/hungvutourchain/accountantportalapis:latest
     environment:
       Kestrel__EndPoints__Http__Url: http://0.0.0.0:81
       JwtSecret: 16_length_at_least
       ASPNETCORE_ENVIRONMENT: QA
-      MongoDatabaseSettings__ConnectionString: mongodb://daAdminUser:AQtdYDFpc9dzgdyV@infrastructure_mongodb/dataTourChain
+      MongoDatabaseSettings__ConnectionString: mongodb://AdminAccountantPortal:Kawa#150691vu@infrastructure_mongodb/dataTourChain
       MongoDatabaseSettings__DatabaseName: dataTourChain
       ConnectionStrings__sqlTourChain: "Data Source=128.199.72.245;User ID=sa;Password=Pa$sword279;Initial Catalog=TourChainSql;Connect Timeout=30;Encrypt=False;TrustServerCertificate=False;ApplicationIntent=ReadWrite;MultiSubnetFailover=False"
       Sentry_Source: "netCoreApiAccountantPortal"
