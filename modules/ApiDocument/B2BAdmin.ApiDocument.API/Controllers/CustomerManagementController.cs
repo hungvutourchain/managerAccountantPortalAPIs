@@ -177,6 +177,178 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             return Ok(items);
         }
 
+        [HttpGet("account-types/manage")]
+        public async Task<IActionResult> GetAccountTypeConfigsAsync(
+            [FromQuery] string search = null,
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 20,
+            [FromQuery] string sortBy = "accountType",
+            [FromQuery] string sortDirection = "asc")
+        {
+            page = page < 1 ? 1 : page;
+            pageSize = pageSize < 1 ? 20 : Math.Min(pageSize, 200);
+
+            var filterBuilder = Builders<BsonDocument>.Filter;
+            var filters = new List<FilterDefinition<BsonDocument>>
+            {
+                filterBuilder.Ne("isDelete", true),
+                filterBuilder.Ne("isDeleted", true)
+            };
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var keyword = search.Trim();
+                var keywordRegex = new BsonRegularExpression(keyword, "i");
+                filters.Add(filterBuilder.Or(
+                    filterBuilder.Regex("accountType", keywordRegex),
+                    filterBuilder.Regex("accountName", keywordRegex),
+                    filterBuilder.Regex("accountNameLocal", keywordRegex)
+                ));
+            }
+
+            var finalFilter = filters.Count == 0 ? filterBuilder.Empty : filterBuilder.And(filters);
+            var totalItems = (int)await _apiDocumentDbContext.AccountTypes.CountDocumentsAsync(finalFilter);
+
+            var isDesc = string.Equals(sortDirection, "desc", StringComparison.OrdinalIgnoreCase);
+            var sort = (sortBy ?? "accountType").Trim().ToLowerInvariant() switch
+            {
+                "accountname" => isDesc
+                    ? Builders<BsonDocument>.Sort.Descending("accountName")
+                    : Builders<BsonDocument>.Sort.Ascending("accountName"),
+                "updatedat" => isDesc
+                    ? Builders<BsonDocument>.Sort.Descending("updatedAt")
+                    : Builders<BsonDocument>.Sort.Ascending("updatedAt"),
+                _ => isDesc
+                    ? Builders<BsonDocument>.Sort.Descending("accountType")
+                    : Builders<BsonDocument>.Sort.Ascending("accountType")
+            };
+
+            var docs = await _apiDocumentDbContext.AccountTypes
+                .Find(finalFilter)
+                .Sort(sort)
+                .Skip((page - 1) * pageSize)
+                .Limit(pageSize)
+                .ToListAsync();
+
+            var items = docs.Select(doc => new
+            {
+                id = GetBsonId(doc),
+                accountType = GetBsonString(doc, "accountType"),
+                accountName = GetBsonString(doc, "accountName"),
+                accountNameLocal = GetBsonString(doc, "accountNameLocal"),
+                updatedAt = GetBsonDateTime(doc, "updatedAt")
+            }).ToList();
+
+            return Ok(new
+            {
+                page,
+                pageSize,
+                totalItems,
+                totalPages = (int)Math.Ceiling(totalItems / (double)pageSize),
+                items
+            });
+        }
+
+        [HttpPost("account-types")]
+        public async Task<IActionResult> UpsertAccountTypeConfigAsync([FromBody] AccountTypeConfigUpsertRequest payload)
+        {
+            if (payload == null)
+            {
+                return BadRequest("Invalid payload");
+            }
+
+            var accountType = NormalizeAccountType(payload.accountType);
+            if (string.IsNullOrWhiteSpace(accountType))
+            {
+                return BadRequest("accountType is required");
+            }
+
+            var accountName = (payload.accountName ?? string.Empty).Trim();
+            var accountNameLocal = (payload.accountNameLocal ?? string.Empty).Trim();
+            var now = DateTime.UtcNow;
+
+            var requestedId = (payload.id ?? string.Empty).Trim();
+            var updateFilter = BuildBsonIdFilter(requestedId);
+            var existing = updateFilter == null
+                ? null
+                : await _apiDocumentDbContext.AccountTypes.Find(updateFilter).FirstOrDefaultAsync();
+
+            var duplicateFilter = Builders<BsonDocument>.Filter.And(
+                Builders<BsonDocument>.Filter.Eq("accountType", accountType),
+                Builders<BsonDocument>.Filter.Ne("isDelete", true),
+                Builders<BsonDocument>.Filter.Ne("isDeleted", true)
+            );
+
+            var duplicate = await _apiDocumentDbContext.AccountTypes.Find(duplicateFilter).FirstOrDefaultAsync();
+            if (duplicate != null)
+            {
+                var duplicateId = GetBsonId(duplicate);
+                if (string.IsNullOrWhiteSpace(requestedId) || !string.Equals(duplicateId, requestedId, StringComparison.Ordinal))
+                {
+                    return Conflict(new { message = "accountType already exists" });
+                }
+            }
+
+            if (existing != null)
+            {
+                existing["accountType"] = accountType;
+                existing["accountName"] = accountName;
+                existing["accountNameLocal"] = accountNameLocal;
+                existing["updatedAt"] = now;
+
+                if (!existing.Contains("createdAt"))
+                {
+                    existing["createdAt"] = now;
+                }
+
+                existing["isDelete"] = false;
+                existing["isDeleted"] = false;
+
+                await _apiDocumentDbContext.AccountTypes.ReplaceOneAsync(updateFilter, existing);
+                return Ok(new { success = true, id = GetBsonId(existing) });
+            }
+
+            var document = new BsonDocument
+            {
+                ["_id"] = ObjectId.GenerateNewId(),
+                ["accountType"] = accountType,
+                ["accountName"] = accountName,
+                ["accountNameLocal"] = accountNameLocal,
+                ["isDelete"] = false,
+                ["isDeleted"] = false,
+                ["createdAt"] = now,
+                ["updatedAt"] = now
+            };
+
+            await _apiDocumentDbContext.AccountTypes.InsertOneAsync(document);
+            return Ok(new { success = true, id = GetBsonId(document) });
+        }
+
+        [HttpDelete("account-types/{id}")]
+        public async Task<IActionResult> DeleteAccountTypeConfigAsync(string id)
+        {
+            var filter = BuildBsonIdFilter(id);
+            if (filter == null)
+            {
+                return BadRequest("Invalid id");
+            }
+
+            var existing = await _apiDocumentDbContext.AccountTypes.Find(filter).FirstOrDefaultAsync();
+            if (existing == null)
+            {
+                return NotFound();
+            }
+
+            var now = DateTime.UtcNow;
+            existing["isDelete"] = true;
+            existing["isDeleted"] = true;
+            existing["deletedAt"] = now;
+            existing["updatedAt"] = now;
+
+            await _apiDocumentDbContext.AccountTypes.ReplaceOneAsync(filter, existing);
+            return Ok(new { success = true });
+        }
+
         [HttpPost("customers")]
         public async Task<IActionResult> UpsertCustomerAsync([FromBody] CustomerAccount payload)
         {
@@ -1744,6 +1916,73 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             return value.ToString().Trim();
         }
 
+        private static string GetBsonId(BsonDocument source)
+        {
+            if (source == null || !source.TryGetValue("_id", out var value) || value == null || value.IsBsonNull)
+            {
+                return string.Empty;
+            }
+
+            return value.BsonType == BsonType.ObjectId
+                ? value.AsObjectId.ToString()
+                : value.ToString().Trim();
+        }
+
+        private static DateTime? GetBsonDateTime(BsonDocument source, string key)
+        {
+            if (source == null || string.IsNullOrWhiteSpace(key))
+            {
+                return null;
+            }
+
+            if (!source.TryGetValue(key, out var value) || value == null || value.IsBsonNull)
+            {
+                return null;
+            }
+
+            if (value.BsonType == BsonType.DateTime)
+            {
+                return value.ToUniversalTime();
+            }
+
+            var text = value.ToString();
+            if (DateTime.TryParse(text, out var parsed))
+            {
+                return DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+            }
+
+            return null;
+        }
+
+        private static FilterDefinition<BsonDocument> BuildBsonIdFilter(string id)
+        {
+            var normalized = (id ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return null;
+            }
+
+            if (ObjectId.TryParse(normalized, out var objectId))
+            {
+                return Builders<BsonDocument>.Filter.Or(
+                    Builders<BsonDocument>.Filter.Eq("_id", objectId),
+                    Builders<BsonDocument>.Filter.Eq("_id", normalized));
+            }
+
+            return Builders<BsonDocument>.Filter.Eq("_id", normalized);
+        }
+
+        private static string NormalizeAccountType(string value)
+        {
+            var trimmed = (value ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return string.Empty;
+            }
+
+            return string.Concat(trimmed.Where(ch => !char.IsWhiteSpace(ch)));
+        }
+
         private class DebtListItemDto
         {
             public string id { get; set; }
@@ -1797,6 +2036,14 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             public string field { get; set; }
             public string oldValue { get; set; }
             public string newValue { get; set; }
+        }
+
+        public class AccountTypeConfigUpsertRequest
+        {
+            public string id { get; set; }
+            public string accountType { get; set; }
+            public string accountName { get; set; }
+            public string accountNameLocal { get; set; }
         }
 
     }
