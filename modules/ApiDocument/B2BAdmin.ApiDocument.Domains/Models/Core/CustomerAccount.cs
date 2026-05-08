@@ -96,7 +96,17 @@ namespace B2BAdmin.ApiDocument.Domains.Models
         [BsonElement("updatedBy")]
         [JsonPropertyName("updatedBy")]
         public string? updatedBy { get; set; }
-    }
+        [BsonElement("isDeleted")]
+        [JsonPropertyName("isDeleted")]
+        public bool isDeleted { get; set; } = false;
+
+        [BsonElement("deletedAt")]
+        [JsonPropertyName("deletedAt")]
+        public DateTime? deletedAt { get; set; }
+
+        [BsonElement("deletedBy")]
+        [JsonPropertyName("deletedBy")]
+        public string? deletedBy { get; set; }    }
 
     [BsonIgnoreExtraElements]
     public class DebtTransactionRecord
@@ -208,6 +218,18 @@ namespace B2BAdmin.ApiDocument.Domains.Models
         [BsonElement("updatedBy")]
         [JsonPropertyName("updatedBy")]
         public string? updatedBy { get; set; }
+
+        [BsonElement("isDeleted")]
+        [JsonPropertyName("isDeleted")]
+        public bool isDeleted { get; set; } = false;
+
+        [BsonElement("deletedAt")]
+        [JsonPropertyName("deletedAt")]
+        public DateTime? deletedAt { get; set; }
+
+        [BsonElement("deletedBy")]
+        [JsonPropertyName("deletedBy")]
+        public string? deletedBy { get; set; }
     }
 
     [BsonIgnoreExtraElements]
@@ -252,5 +274,17 @@ namespace B2BAdmin.ApiDocument.Domains.Models
         [BsonElement("note")]
         [JsonPropertyName("note")]
         public string? note { get; set; }
+
+        [BsonElement("isDeleted")]
+        [JsonPropertyName("isDeleted")]
+        public bool isDeleted { get; set; } = false;
+
+        [BsonElement("deletedAt")]
+        [JsonPropertyName("deletedAt")]
+        public DateTime? deletedAt { get; set; }
+
+        [BsonElement("deletedBy")]
+        [JsonPropertyName("deletedBy")]
+        public string? deletedBy { get; set; }
     }
 }

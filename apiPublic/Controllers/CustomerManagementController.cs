@@ -61,6 +61,12 @@ namespace ApiPlugin.Controllers
                 filters.Add(filterBuilder.Eq(x => x.riskLevel, riskLevel));
             }
 
+            // Exclude soft-deleted records
+            filters.Add(filterBuilder.Eq(x => x.isDeleted, false));
+
+            // Exclude soft-deleted customers
+            filters.Add(filterBuilder.Eq(x => x.isDeleted, false));
+
             var finalFilter = filters.Count > 0 ? filterBuilder.And(filters) : filterBuilder.Empty;
 
             var sortDefinition = BuildSort(sortBy, sortDirection);
@@ -86,7 +92,8 @@ namespace ApiPlugin.Controllers
         [HttpGet("summary")]
         public async Task<IActionResult> GetSummaryAsync()
         {
-            var data = await _apiDocumentDbContext.CustomerAccounts.Find(Builders<CustomerAccount>.Filter.Empty).ToListAsync();
+            var filter = Builders<CustomerAccount>.Filter.Eq(x => x.isDeleted, false);
+            var data = await _apiDocumentDbContext.CustomerAccounts.Find(filter).ToListAsync();
 
             var totalCustomers = data.Count;
             var activeCustomers = data.Count(x => string.Equals(x.status, "active", StringComparison.OrdinalIgnoreCase));
@@ -222,15 +229,17 @@ namespace ApiPlugin.Controllers
             var filter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, id);
             var customer = await _apiDocumentDbContext.CustomerAccounts.Find(filter).FirstOrDefaultAsync();
 
-            if (customer == null)
+            if (customer == null || customer.isDeleted)
             {
                 return NotFound();
             }
 
             await MigrateLegacyDataForCustomerAsync(customer, true);
 
-            var logsFilter = Builders<CustomerAuditLogEntry>.Filter.Eq(x => x.customerId, id);
-            var totalItems = (int)await _apiDocumentDbContext.CustomerAuditLogs.CountDocumentsAsync(logsFilter);
+                var logsFilter = Builders<CustomerAuditLogEntry>.Filter.And(
+                    Builders<CustomerAuditLogEntry>.Filter.Eq(x => x.customerId, id),
+                    Builders<CustomerAuditLogEntry>.Filter.Eq(x => x.isDeleted, false));
+                var totalItems = (int)await _apiDocumentDbContext.CustomerAuditLogs.CountDocumentsAsync(logsFilter);
             var items = await _apiDocumentDbContext.CustomerAuditLogs
                 .Find(logsFilter)
                 .SortByDescending(x => x.changedAt)
@@ -257,19 +266,79 @@ namespace ApiPlugin.Controllers
             }
 
             var filter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, id);
-            var deleteResult = await _apiDocumentDbContext.CustomerAccounts.DeleteOneAsync(filter);
+            var customer = await _apiDocumentDbContext.CustomerAccounts.Find(filter).FirstOrDefaultAsync();
 
-            if (deleteResult.DeletedCount == 0)
+            if (customer == null)
             {
                 return NotFound();
             }
 
-            var transactionFilter = Builders<CustomerDebtTransaction>.Filter.Eq(x => x.customerId, id);
-            var auditFilter = Builders<CustomerAuditLogEntry>.Filter.Eq(x => x.customerId, id);
-            await _apiDocumentDbContext.CustomerDebtTransactions.DeleteManyAsync(transactionFilter);
-            await _apiDocumentDbContext.CustomerAuditLogs.DeleteManyAsync(auditFilter);
+            var actor = GetCurrentActor();
+            var now = DateTime.UtcNow;
 
-            return Ok(new { success = true });
+            // Soft delete customer
+            customer.isDeleted = true;
+            customer.deletedAt = now;
+            customer.deletedBy = actor;
+            customer.updatedAt = now;
+            customer.updatedBy = actor;
+
+            await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(filter, customer);
+
+            // Create audit log for deletion
+            await AppendCustomerAuditLogAsync(CreateAuditLogEntry(
+                customer.Id,
+                null,
+                "delete",
+                "record",
+                "active",
+                "deleted",
+                actor,
+                "Customer deleted"));
+
+            // Soft delete related transactions
+            var transactionFilter = Builders<CustomerDebtTransaction>.Filter.And(
+                Builders<CustomerDebtTransaction>.Filter.Eq(x => x.customerId, id),
+                Builders<CustomerDebtTransaction>.Filter.Eq(x => x.isDeleted, false));
+
+            var transactionsToDelete = await _apiDocumentDbContext.CustomerDebtTransactions
+                .Find(transactionFilter)
+                .ToListAsync();
+
+            foreach (var transaction in transactionsToDelete)
+            {
+                transaction.isDeleted = true;
+                transaction.deletedAt = now;
+                transaction.deletedBy = actor;
+                transaction.updatedAt = now;
+                transaction.updatedBy = actor;
+
+                await _apiDocumentDbContext.CustomerDebtTransactions.ReplaceOneAsync(
+                    Builders<CustomerDebtTransaction>.Filter.Eq(x => x.id, transaction.id),
+                    transaction);
+            }
+
+            // Soft delete related audit logs
+            var auditFilter = Builders<CustomerAuditLogEntry>.Filter.And(
+                Builders<CustomerAuditLogEntry>.Filter.Eq(x => x.customerId, id),
+                Builders<CustomerAuditLogEntry>.Filter.Eq(x => x.isDeleted, false));
+
+            var auditsToDelete = await _apiDocumentDbContext.CustomerAuditLogs
+                .Find(auditFilter)
+                .ToListAsync();
+
+            foreach (var audit in auditsToDelete)
+            {
+                audit.isDeleted = true;
+                audit.deletedAt = now;
+                audit.deletedBy = actor;
+
+                await _apiDocumentDbContext.CustomerAuditLogs.ReplaceOneAsync(
+                    Builders<CustomerAuditLogEntry>.Filter.Eq(x => x.id, audit.id),
+                    audit);
+            }
+
+            return Ok(new { success = true, message = "Customer marked as deleted" });
         }
 
         [HttpPost("maintenance/migrate-legacy-customer-data")]
@@ -591,7 +660,7 @@ namespace ApiPlugin.Controllers
 
             var transactionFilter = Builders<CustomerDebtTransaction>.Filter.Eq(x => x.id, transactionId);
             var transaction = await _apiDocumentDbContext.CustomerDebtTransactions.Find(transactionFilter).FirstOrDefaultAsync();
-            if (transaction == null)
+            if (transaction == null || transaction.isDeleted)
             {
                 var legacyCustomerFilter = Builders<CustomerAccount>.Filter.ElemMatch(x => x.debtTransactions, t => t.id == transactionId);
                 var legacyCustomer = await _apiDocumentDbContext.CustomerAccounts.Find(legacyCustomerFilter).FirstOrDefaultAsync();
@@ -602,7 +671,7 @@ namespace ApiPlugin.Controllers
 
                 await MigrateLegacyDataForCustomerAsync(legacyCustomer, true);
                 transaction = await _apiDocumentDbContext.CustomerDebtTransactions.Find(transactionFilter).FirstOrDefaultAsync();
-                if (transaction == null)
+                if (transaction == null || transaction.isDeleted)
                 {
                     return NotFound("Transaction not found");
                 }
@@ -736,7 +805,8 @@ namespace ApiPlugin.Controllers
                 logsFilterBuilder.Eq(x => x.customerId, transaction.customerId),
                 logsFilterBuilder.Or(
                     logsFilterBuilder.Eq(x => x.transactionId, transactionId),
-                    logsFilterBuilder.Regex(x => x.field, new MongoDB.Bson.BsonRegularExpression(fieldPrefixPattern, "i"))));
+                    logsFilterBuilder.Regex(x => x.field, new MongoDB.Bson.BsonRegularExpression(fieldPrefixPattern, "i"))),
+                logsFilterBuilder.Eq(x => x.isDeleted, false));
 
             var totalItems = (int)await _apiDocumentDbContext.CustomerAuditLogs.CountDocumentsAsync(logsFilter);
             var items = await _apiDocumentDbContext.CustomerAuditLogs
@@ -772,7 +842,7 @@ namespace ApiPlugin.Controllers
             if (!string.IsNullOrWhiteSpace(customerId))
             {
                 var customerExists = await _apiDocumentDbContext.CustomerAccounts
-                    .Find(x => x.Id == customerId)
+                    .Find(x => x.Id == customerId && !x.isDeleted)
                     .AnyAsync();
 
                 if (!customerExists)
@@ -794,7 +864,7 @@ namespace ApiPlugin.Controllers
                 : transactionFilterBuilder.Empty;
 
             var transactionDocs = await _apiDocumentDbContext.CustomerDebtTransactions
-                .Find(transactionFilter)
+                .Find(transactionFilterBuilder.And(transactionFilter, transactionFilterBuilder.Eq(x => x.isDeleted, false)))
                 .ToListAsync();
 
             var transactionCustomerIds = transactionDocs
@@ -805,7 +875,7 @@ namespace ApiPlugin.Controllers
             var customers = transactionCustomerIds.Count == 0
                 ? new List<CustomerAccount>()
                 : await _apiDocumentDbContext.CustomerAccounts
-                    .Find(x => transactionCustomerIds.Contains(x.Id))
+                    .Find(x => transactionCustomerIds.Contains(x.Id) && !x.isDeleted)
                     .ToListAsync();
             var customerLookup = customers
                 .Where(x => !string.IsNullOrWhiteSpace(x.Id))
