@@ -7,7 +7,6 @@ on:
 env:
   RESISTRY: ghcr.io
   IMAGE_NAME7: hungvutourchain/netcoreapi:latest
-  GHCR_USERNAME: hungvutourchain
   PAT: ${{secrets.PAT}}
   # IP: 152.42.245.213 
   IP: 159.89.193.175
@@ -43,6 +42,6 @@ jobs:
           ssh-keyscan -H ${{ env.IP }} > ~/.ssh/known_hosts
       - name: Connect and pull docker image
         run: |
-          ssh root@${{ env.IP }} "echo '${{ env.PAT }}' | docker login ghcr.io -u '${{ env.GHCR_USERNAME }}' --password-stdin && cd /host/tourchain/develop && docker stack deploy --compose-file docker-document-api.yml tourchain --with-registry-auth"
+          ssh root@${{ env.IP }} "echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin && cd .. && cd /host/tourchain/develop && docker stack deploy --compose-file docker-document-api.yml tourchain --with-registry-auth"
       - name: cleanup
         run: rm -rf ~/.ssh
