@@ -835,11 +835,177 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 : string.Join("-", customer.code.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
             var exportNow = ConvertToDisplayTime(DateTime.UtcNow);
             var fileName = $"so-chi-tiet-cong-no-{safeCode}-{exportNow:yyyyMMddHHmmss}.xlsx";
+            var actor = GetCurrentActor();
+            var exportedAt = DateTime.UtcNow;
+            var exportHistoryId = Guid.NewGuid().ToString("N");
+            var exportDirectory = EnsureDebtExportHistoryDirectory(customer.Id, exportNow, out var relativeDirectory);
+            var storedFileName = BuildStoredFileName(fileName, exportHistoryId);
+            var absolutePath = Path.Combine(exportDirectory, storedFileName);
+            await System.IO.File.WriteAllBytesAsync(absolutePath, fileBytes);
+
+            var exportHistory = new CustomerDebtExportHistory
+            {
+                id = exportHistoryId,
+                customerId = customer.Id,
+                customerCode = NormalizeText(customer.code),
+                customerName = NormalizeText(customer.name),
+                fileName = fileName,
+                storedFileName = storedFileName,
+                relativePath = BuildDebtExportHistoryRelativePath(relativeDirectory, storedFileName),
+                contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                size = fileBytes.LongLength,
+                periodFrom = transactions.Count == 0 ? (DateTime?)null : transactions.Min(x => x.transactionAt),
+                periodTo = transactions.Count == 0 ? (DateTime?)null : transactions.Max(x => x.transactionAt),
+                transactionCount = transactions.Count,
+                exportedAt = exportedAt,
+                exportedBy = actor,
+            };
+            await _apiDocumentDbContext.CustomerDebtExportHistories.InsertOneAsync(exportHistory);
 
             return File(
                 fileBytes,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 fileName);
+        }
+
+        [HttpGet("customers/{customerId}/export-excel-history")]
+        public async Task<IActionResult> GetDebtCustomerExcelExportHistoryAsync(
+            string customerId,
+            [FromQuery] string search = null,
+            [FromQuery] string exportedBy = null,
+            [FromQuery] DateTime? fromDate = null,
+            [FromQuery] DateTime? toDate = null,
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 20,
+            [FromQuery] string sortBy = "exportedAt",
+            [FromQuery] string sortDirection = "desc")
+        {
+            if (string.IsNullOrWhiteSpace(customerId))
+            {
+                return BadRequest("Invalid customerId");
+            }
+
+            page = page < 1 ? 1 : page;
+            pageSize = pageSize < 1 ? 20 : Math.Min(pageSize, 200);
+
+            var customer = await _apiDocumentDbContext.CustomerAccounts
+                .Find(x => x.Id == customerId && !x.isDeleted)
+                .Project(x => new CustomerAccount
+                {
+                    Id = x.Id
+                })
+                .FirstOrDefaultAsync();
+            if (customer == null)
+            {
+                return NotFound("Customer not found");
+            }
+
+            var historyFilterBuilder = Builders<CustomerDebtExportHistory>.Filter;
+            var historyFilters = new List<FilterDefinition<CustomerDebtExportHistory>>
+            {
+                historyFilterBuilder.Eq(x => x.customerId, customerId),
+                historyFilterBuilder.Eq(x => x.isDeleted, false),
+            };
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var keyword = search.Trim();
+                historyFilters.Add(historyFilterBuilder.Or(
+                    historyFilterBuilder.Regex(x => x.fileName, new MongoDB.Bson.BsonRegularExpression(Regex.Escape(keyword), "i")),
+                    historyFilterBuilder.Regex(x => x.storedFileName, new MongoDB.Bson.BsonRegularExpression(Regex.Escape(keyword), "i"))));
+            }
+
+            if (!string.IsNullOrWhiteSpace(exportedBy))
+            {
+                var exportedByKeyword = exportedBy.Trim();
+                historyFilters.Add(historyFilterBuilder.Regex(x => x.exportedBy, new MongoDB.Bson.BsonRegularExpression(Regex.Escape(exportedByKeyword), "i")));
+            }
+
+            if (fromDate.HasValue)
+            {
+                historyFilters.Add(historyFilterBuilder.Gte(x => x.exportedAt, fromDate.Value.Date));
+            }
+
+            if (toDate.HasValue)
+            {
+                var toExclusive = toDate.Value.Date.AddDays(1);
+                historyFilters.Add(historyFilterBuilder.Lt(x => x.exportedAt, toExclusive));
+            }
+
+            var historyFilter = historyFilterBuilder.And(historyFilters);
+
+            var isDesc = string.Equals(sortDirection, "desc", StringComparison.OrdinalIgnoreCase);
+            SortDefinition<CustomerDebtExportHistory> sortDefinition;
+            switch ((sortBy ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "filename":
+                    sortDefinition = isDesc
+                        ? Builders<CustomerDebtExportHistory>.Sort.Descending(x => x.fileName)
+                        : Builders<CustomerDebtExportHistory>.Sort.Ascending(x => x.fileName);
+                    break;
+                case "size":
+                    sortDefinition = isDesc
+                        ? Builders<CustomerDebtExportHistory>.Sort.Descending(x => x.size)
+                        : Builders<CustomerDebtExportHistory>.Sort.Ascending(x => x.size);
+                    break;
+                case "exportedby":
+                    sortDefinition = isDesc
+                        ? Builders<CustomerDebtExportHistory>.Sort.Descending(x => x.exportedBy)
+                        : Builders<CustomerDebtExportHistory>.Sort.Ascending(x => x.exportedBy);
+                    break;
+                default:
+                    sortDefinition = isDesc
+                        ? Builders<CustomerDebtExportHistory>.Sort.Descending(x => x.exportedAt)
+                        : Builders<CustomerDebtExportHistory>.Sort.Ascending(x => x.exportedAt);
+                    break;
+            }
+
+            var totalItems = (int)await _apiDocumentDbContext.CustomerDebtExportHistories.CountDocumentsAsync(historyFilter);
+            var items = await _apiDocumentDbContext.CustomerDebtExportHistories
+                .Find(historyFilter)
+                .Sort(sortDefinition)
+                .Skip((page - 1) * pageSize)
+                .Limit(pageSize)
+                .ToListAsync();
+
+            return Ok(new
+            {
+                page,
+                pageSize,
+                totalItems,
+                totalPages = (int)Math.Ceiling(totalItems / (double)pageSize),
+                items
+            });
+        }
+
+        [HttpGet("customers/{customerId}/export-excel-history/{historyId}/download")]
+        public async Task<IActionResult> DownloadDebtCustomerExcelExportHistoryAsync(string customerId, string historyId)
+        {
+            if (string.IsNullOrWhiteSpace(customerId) || string.IsNullOrWhiteSpace(historyId))
+            {
+                return BadRequest("Invalid request");
+            }
+
+            var history = await _apiDocumentDbContext.CustomerDebtExportHistories
+                .Find(x => x.customerId == customerId && x.id == historyId && !x.isDeleted)
+                .FirstOrDefaultAsync();
+            if (history == null)
+            {
+                return NotFound("Export history not found");
+            }
+
+            var filePath = ResolveDebtExportHistoryAbsolutePath(history);
+            if (!System.IO.File.Exists(filePath))
+            {
+                return NotFound("Export file not found");
+            }
+
+            return PhysicalFile(
+                filePath,
+                string.IsNullOrWhiteSpace(history.contentType)
+                    ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    : history.contentType,
+                string.IsNullOrWhiteSpace(history.fileName) ? "debt-export.xlsx" : history.fileName);
         }
 
         private string BuildPeriodRangeText(List<CustomerDebtTransaction> transactions)
@@ -1130,7 +1296,25 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             return path;
         }
 
+        private string EnsureDebtExportHistoryDirectory(string customerId, DateTime exportedAt, out string relativeDirectory)
+        {
+            var safeCustomerId = SanitizePathSegment(customerId, "customer");
+            relativeDirectory = Path.Combine(
+                exportedAt.ToString("ddMMMyyyy", System.Globalization.CultureInfo.InvariantCulture),
+                safeCustomerId)
+                .Replace("\\", "/");
+
+            var path = Path.Combine(GetDebtExportHistoryRootPath(), relativeDirectory.Replace("/", Path.DirectorySeparatorChar.ToString()));
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
         private string BuildTransactionAttachmentRelativePath(string relativeDirectory, string storedFileName)
+        {
+            return Path.Combine(relativeDirectory ?? string.Empty, storedFileName ?? string.Empty).Replace("\\", "/");
+        }
+
+        private string BuildDebtExportHistoryRelativePath(string relativeDirectory, string storedFileName)
         {
             return Path.Combine(relativeDirectory ?? string.Empty, storedFileName ?? string.Empty).Replace("\\", "/");
         }
@@ -1164,6 +1348,33 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             return Path.Combine(EnsureLegacyTransactionAttachmentDirectory(transactionId), attachment?.storedFileName ?? string.Empty);
         }
 
+        private string ResolveDebtExportHistoryAbsolutePath(CustomerDebtExportHistory history)
+        {
+            if (history == null)
+            {
+                return Path.Combine(GetDebtExportHistoryRootPath(), string.Empty);
+            }
+
+            if (!string.IsNullOrWhiteSpace(history.relativePath))
+            {
+                if (Path.IsPathRooted(history.relativePath))
+                {
+                    return history.relativePath;
+                }
+
+                var normalizedRelativePath = history.relativePath
+                    .Replace("/", Path.DirectorySeparatorChar.ToString())
+                    .TrimStart(Path.DirectorySeparatorChar);
+                return Path.Combine(GetDebtExportHistoryRootPath(), normalizedRelativePath);
+            }
+
+            var customerFolder = SanitizePathSegment(history.customerId, "customer");
+            var fileName = string.IsNullOrWhiteSpace(history.storedFileName)
+                ? GetSafeOriginalFileName(history.fileName)
+                : history.storedFileName;
+            return Path.Combine(GetDebtExportHistoryRootPath(), customerFolder, fileName);
+        }
+
         private string GetDebtTransactionAttachmentRootPath()
         {
             var configuredPath = _configuration["AttachmentStorage:DebtTransactionRootPath"];
@@ -1176,6 +1387,20 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             }
 
             return Path.Combine(_webHostEnvironment.ContentRootPath, "AppData", "DebtTransactionFiles");
+        }
+
+        private string GetDebtExportHistoryRootPath()
+        {
+            var configuredPath = _configuration["AttachmentStorage:DebtExportHistoryRootPath"];
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                var trimmed = configuredPath.Trim();
+                return Path.IsPathRooted(trimmed)
+                    ? trimmed
+                    : Path.GetFullPath(trimmed, _webHostEnvironment.ContentRootPath);
+            }
+
+            return Path.Combine(GetDebtTransactionAttachmentRootPath(), "ExportHistory");
         }
 
         private string GetSafeOriginalFileName(string fileName)

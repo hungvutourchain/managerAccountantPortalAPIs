@@ -56,6 +56,7 @@ namespace B2BAdmin.ApiDocument.Infrastructure
         public MongoDB.Driver.IMongoCollection<BsonDocument> AccountTypes { get { return _database.GetCollection<BsonDocument>("account_types"); } }
         public MongoDB.Driver.IMongoCollection<CustomerDebtTransaction> CustomerDebtTransactions { get { return _database.GetCollection<CustomerDebtTransaction>("customer_debt_transactions"); } }
         public MongoDB.Driver.IMongoCollection<CustomerAuditLogEntry> CustomerAuditLogs { get { return _database.GetCollection<CustomerAuditLogEntry>("customer_audit_logs"); } }
+        public MongoDB.Driver.IMongoCollection<CustomerDebtExportHistory> CustomerDebtExportHistories { get { return _database.GetCollection<CustomerDebtExportHistory>("customer_debt_export_histories"); } }
 
         //
 
