@@ -1,0 +1,44 @@
+name: Deploy HELLOASIATRAVEL to Docker Swarm
+
+on:
+  push:
+    branches: ["trialDev"] # Adjust as needed
+# ghcr.io/hungvutourchain/tourchain-net/hoteltourportal:latest
+env:
+  RESISTRY: ghcr.io
+  IMAGE_NAME7: hungvutourchain/netcoreapi:latest
+  PAT: ${{secrets.PAT}}
+  # IP: 152.42.245.213 
+  IP: 159.89.193.175
+  SSH: ${{ secrets.SSH_PRIVATE_KEY }}
+jobs:
+  publish_document_api:
+    if: contains(github.event.head_commit.message, 'NetCoreApi')
+    name: publish image .Net Document Api
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Login to GitHub Container Registry
+        run: |
+          echo ${{ env.PAT }} | docker login ghcr.io -u ${{ github.actor }} -p ${{ env.PAT }}
+
+      - name: Build and push Docker image
+        run: |
+          docker build . -t ${{ env.RESISTRY }}/${{ env.IMAGE_NAME7 }} -f "apiPublic/Dockerfile"
+          docker push ${{ env.RESISTRY }}/${{ env.IMAGE_NAME7 }}
+
+  deploy_document_api:
+    needs: publish_document_api
+    name: Deploy Core document api Docker Swarm
+    runs-on: ubuntu-latest
+    steps:
+      - name: install ssh keys
+        run: |
+          install -m 600 -D /dev/null ~/.ssh/id_rsa
+          echo "${{ env.SSH }}" > ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.IP }} > ~/.ssh/known_hosts
+      - name: Connect and pull docker image
+        run: |
+          ssh root@${{ env.IP }} "echo ${{ env.PAT }} | docker login ghcr.io -u ${{ github.actor }} -p ${{ env.PAT }} && cd .. && cd /host/tourchain/develop && docker stack deploy --compose-file docker-document-api.yml tourchain --with-registry-auth"
+      - name: cleanup
+        run: rm -rf ~/.ssh
