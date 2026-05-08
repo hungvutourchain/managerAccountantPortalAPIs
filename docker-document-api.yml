@@ -9,7 +9,7 @@ services:
       JwtSecret: 16_length_at_least
       ASPNETCORE_ENVIRONMENT: QA
       PathBase: /b2badminapi
-      MongoDatabaseSettings__ConnectionString: mongodb://mongoadmin:Tourch%40in%23179@infrastructure_mongodb/AccountantPortal?authSource=admin
+      MongoDatabaseSettings__ConnectionString: mongodb://AdminAccountantPortal:PssAccountantPortal@infrastructure_mongodb/AccountantPortal?authSource=admin
       MongoDatabaseSettings__DatabaseName: AccountantPortal
       ConnectionStrings__sqlTourChain: 'Data Source=128.199.72.245;User ID=sa;Password=Pa$$sword279;Initial Catalog=TourChainSql;Connect Timeout=30;Encrypt=False;TrustServerCertificate=False;ApplicationIntent=ReadWrite;MultiSubnetFailover=False'
       Sentry_Source: "netCoreApiAccountantPortal"

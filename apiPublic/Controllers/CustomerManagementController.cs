@@ -109,78 +109,100 @@ namespace ApiPlugin.Controllers
         [HttpPost("customers")]
         public async Task<IActionResult> UpsertCustomerAsync([FromBody] CustomerAccount payload)
         {
-            if (payload == null || string.IsNullOrWhiteSpace(payload.name))
+            try
             {
-                return BadRequest("Invalid payload");
+                if (payload == null || string.IsNullOrWhiteSpace(payload.name))
+                {
+                    return BadRequest("Invalid payload");
+                }
+
+                var now = DateTime.UtcNow;
+                var actor = GetCurrentActor();
+                payload.updatedAt = now;
+                payload.updatedBy = actor;
+
+                // Check if this is a new record (no valid Id provided, or auto-generated ObjectId without matching customer)
+                bool isNewRecord = string.IsNullOrWhiteSpace(payload.Id);
+                
+                // If ID exists, check if it's a valid existing customer
+                if (!isNewRecord)
+                {
+                    var filter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, payload.Id);
+                    var existing = await _apiDocumentDbContext.CustomerAccounts.Find(filter).FirstOrDefaultAsync();
+                    
+                    if (existing != null)
+                    {
+                        // Existing customer - proceed with update logic
+                        payload.createdAt = existing.createdAt;
+                        payload.createdBy = existing.createdBy;
+
+                        var changes = BuildCustomerChanges(existing, payload);
+
+                        await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(filter, payload);
+
+                        if (changes.Count > 0)
+                        {
+                            var logs = changes.Select(change => CreateAuditLogEntry(
+                                payload.Id,
+                                null,
+                                "update",
+                                change.field,
+                                change.oldValue,
+                                change.newValue,
+                                actor,
+                                null));
+                            await AppendCustomerAuditLogsAsync(logs);
+                        }
+                        else
+                        {
+                            await AppendCustomerAuditLogAsync(CreateAuditLogEntry(
+                                payload.Id,
+                                null,
+                                "touch",
+                                "record",
+                                null,
+                                null,
+                                actor,
+                                "No field value changed"));
+                        }
+
+                        return Ok(payload);
+                    }
+                    else
+                    {
+                        // ID provided but customer not found - treat as new record
+                        isNewRecord = true;
+                    }
+                }
+
+                // Create new customer
+                if (isNewRecord)
+                {
+                    payload.Id = MongoDB.Bson.ObjectId.GenerateNewId().ToString();
+                    payload.createdAt = now;
+                    payload.createdBy = actor;
+                    await _apiDocumentDbContext.CustomerAccounts.InsertOneAsync(payload);
+
+                    await AppendCustomerAuditLogAsync(CreateAuditLogEntry(
+                        payload.Id,
+                        null,
+                        "create",
+                        "record",
+                        null,
+                        BuildRecordSnapshot(payload),
+                        actor,
+                        "Customer created"));
+
+                    return Ok(payload);
+                }
+
+                return BadRequest("Invalid request");
             }
-
-            var now = DateTime.UtcNow;
-            var actor = GetCurrentActor();
-            payload.updatedAt = now;
-            payload.updatedBy = actor;
-
-            if (string.IsNullOrWhiteSpace(payload.Id))
+            catch (Exception ex)
             {
-                payload.Id = MongoDB.Bson.ObjectId.GenerateNewId().ToString();
-                payload.createdAt = now;
-                payload.createdBy = actor;
-                await _apiDocumentDbContext.CustomerAccounts.InsertOneAsync(payload);
-
-                await AppendCustomerAuditLogAsync(CreateAuditLogEntry(
-                    payload.Id,
-                    null,
-                    "create",
-                    "record",
-                    null,
-                    BuildRecordSnapshot(payload),
-                    actor,
-                    "Customer created"));
-
-                return Ok(payload);
+                System.Diagnostics.Debug.WriteLine($"ERROR in UpsertCustomerAsync: {ex.Message}\n{ex.StackTrace}");
+                return StatusCode(500, new { error = ex.Message, trace = ex.StackTrace });
             }
-
-            var filter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, payload.Id);
-            var existing = await _apiDocumentDbContext.CustomerAccounts.Find(filter).FirstOrDefaultAsync();
-
-            if (existing == null)
-            {
-                return NotFound();
-            }
-
-            payload.createdAt = existing.createdAt;
-            payload.createdBy = existing.createdBy;
-
-            var changes = BuildCustomerChanges(existing, payload);
-
-            await _apiDocumentDbContext.CustomerAccounts.ReplaceOneAsync(filter, payload);
-
-            if (changes.Count > 0)
-            {
-                var logs = changes.Select(change => CreateAuditLogEntry(
-                    payload.Id,
-                    null,
-                    "update",
-                    change.field,
-                    change.oldValue,
-                    change.newValue,
-                    actor,
-                    null));
-                await AppendCustomerAuditLogsAsync(logs);
-            }
-            else
-            {
-                await AppendCustomerAuditLogAsync(CreateAuditLogEntry(
-                    payload.Id,
-                    null,
-                    "touch",
-                    "record",
-                    null,
-                    null,
-                    actor,
-                    "No field value changed"));
-            }
-
-            return Ok(payload);
         }
 
         [HttpGet("customers/{id}/audit-logs")]
