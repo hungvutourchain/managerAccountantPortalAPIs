@@ -1508,10 +1508,15 @@ namespace B2BAdmin.ApiDocument.API.Controllers
         {
             ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
 
-            using var package = new ExcelPackage();
-            var worksheet = package.Workbook.Worksheets.Add("SoChiTietCongNo");
-            worksheet.View.ShowGridLines = false;
-            worksheet.Cells.Style.Font.Name = "Times New Roman";
+            var exportedAccountType = ResolveExportAccountTypeCode(transactions);
+            var ledgerAccountCode = !string.IsNullOrWhiteSpace(exportedAccountType)
+                ? exportedAccountType
+                : ResolveLedgerAccountCode(customer);
+            var ledgerTitle = ledgerAccountCode == "131"
+                ? "SỔ CHI TIẾT CÔNG NỢ PHẢI THU"
+                : ledgerAccountCode == "331"
+                    ? "SỔ CHI TIẾT CÔNG NỢ PHẢI TRẢ"
+                    : $"SỔ CHI TIẾT CÔNG NỢ TK {ledgerAccountCode}";
             worksheet.Cells.Style.Font.Size = 11;
 
             worksheet.Column(1).Width = 8;
@@ -1615,11 +1620,9 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 worksheet.Cells[detailRow, 2].Value = displayTransactionAt;
                 worksheet.Cells[detailRow, 2].Style.Numberformat.Format = "d/M/yy";
                 worksheet.Cells[detailRow, 3].Value = string.IsNullOrWhiteSpace(transaction.note)
-                    ? (string.Equals(transaction.transactionType, "credit", StringComparison.OrdinalIgnoreCase)
-                        ? (ledgerAccountCode == "131" ? "THU TIEN CONG NO" : "THANH TOAN CONG NO")
-                        : (ledgerAccountCode == "131" ? "PHAT SINH CONG NO PHAI THU" : "PHAT SINH CONG NO PHAI TRA"))
+                    ? BuildLedgerDescription(transaction.transactionType, ledgerAccountCode)
                     : transaction.note;
-                worksheet.Cells[detailRow, 4].Value = ledgerAccountCode;
+                worksheet.Cells[detailRow, 4].Value = string.IsNullOrWhiteSpace(transaction.accountType) ? ledgerAccountCode : transaction.accountType;
                 worksheet.Cells[detailRow, 5].Value = string.Equals(transaction.transactionType, "debt", StringComparison.OrdinalIgnoreCase) ? transaction.amount : 0;
                 worksheet.Cells[detailRow, 6].Value = string.Equals(transaction.transactionType, "credit", StringComparison.OrdinalIgnoreCase) ? transaction.amount : 0;
                 worksheet.Cells[detailRow, 7].Value = transaction.note ?? string.Empty;
@@ -1628,6 +1631,31 @@ namespace B2BAdmin.ApiDocument.API.Controllers
 
             var minimumLedgerRows = 8;
             while ((detailRow - (startRow + 1)) < minimumLedgerRows)
+
+        private string ResolveExportAccountTypeCode(IEnumerable<CustomerDebtTransaction> transactions)
+        {
+            if (transactions == null)
+            {
+                return null;
+            }
+
+            return transactions
+                .Select(x => x?.accountType)
+                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+                ?.Trim();
+        }
+
+        private string BuildLedgerDescription(string transactionType, string ledgerAccountCode)
+        {
+            if (ledgerAccountCode != "131" && ledgerAccountCode != "331")
+            {
+                return $"PHAT SINH TK {ledgerAccountCode}";
+            }
+
+            return string.Equals(transactionType, "credit", StringComparison.OrdinalIgnoreCase)
+                ? (ledgerAccountCode == "131" ? "THU TIEN CONG NO" : "THANH TOAN CONG NO")
+                : (ledgerAccountCode == "131" ? "PHAT SINH CONG NO PHAI THU" : "PHAT SINH CONG NO PHAI TRA");
+        }
             {
                 worksheet.Cells[detailRow, 1].Value = string.Empty;
                 worksheet.Cells[detailRow, 2].Value = string.Empty;
