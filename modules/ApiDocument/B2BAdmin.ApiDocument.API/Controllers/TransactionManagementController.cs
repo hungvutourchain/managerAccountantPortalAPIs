@@ -1818,6 +1818,18 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 : (ledgerAccountCode == "131" ? "PHAT SINH CONG NO PHAI THU" : "PHAT SINH CONG NO PHAI TRA");
         }
 
+        private string GetBsonString(BsonDocument document, string fieldName)
+        {
+            if (document == null || string.IsNullOrWhiteSpace(fieldName))
+            {
+                return null;
+            }
+
+            return document.TryGetValue(fieldName, out var value) && value != BsonNull.Value
+                ? value.ToString()
+                : null;
+        }
+
         public class CreateDebtTransactionRequest
         {
             public string customerId { get; set; }
