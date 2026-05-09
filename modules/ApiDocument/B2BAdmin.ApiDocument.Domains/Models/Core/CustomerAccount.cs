@@ -119,6 +119,10 @@ namespace B2BAdmin.ApiDocument.Domains.Models
         [JsonPropertyName("transactionType")]
         public string? transactionType { get; set; }
 
+        [BsonElement("accountType")]
+        [JsonPropertyName("accountType")]
+        public string? accountType { get; set; }
+
         [BsonElement("amount")]
         [JsonPropertyName("amount")]
         public decimal amount { get; set; }
