@@ -15,6 +15,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using MongoDB.Bson;
 using MongoDB.Driver;
 using OfficeOpenXml;
 using OfficeOpenXml.Style;
@@ -834,7 +835,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 .SortBy(x => x.transactionAt)
                 .ToListAsync();
 
-            var fileBytes = BuildDebtCustomerExcelFile(customer, transactions);
+            var fileBytes = await BuildDebtCustomerExcelFileAsync(customer, transactions);
             var safeCode = string.IsNullOrWhiteSpace(customer.code)
                 ? "khach-hang"
                 : string.Join("-", customer.code.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
@@ -1504,7 +1505,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             };
         }
 
-        private byte[] BuildDebtCustomerExcelFile(CustomerAccount customer, List<CustomerDebtTransaction> transactions)
+        private async Task<byte[]> BuildDebtCustomerExcelFileAsync(CustomerAccount customer, List<CustomerDebtTransaction> transactions)
         {
             ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
 
@@ -1514,6 +1515,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             worksheet.Cells.Style.Font.Name = "Times New Roman";
 
             transactions ??= new List<CustomerDebtTransaction>();
+            var balanceSideLookup = await LoadAccountTypeBalanceSideLookupAsync(transactions);
             var exportedAccountType = ResolveExportAccountTypeCode(transactions);
             var ledgerAccountCode = !string.IsNullOrWhiteSpace(exportedAccountType)
                 ? exportedAccountType
@@ -1534,10 +1536,10 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             worksheet.Column(7).Width = 26;
 
             var totalDebit = transactions
-                .Where(x => string.Equals(x.transactionType, "debt", StringComparison.OrdinalIgnoreCase))
+                .Where(x => string.Equals(GetEffectiveTransactionType(x, balanceSideLookup), "debt", StringComparison.OrdinalIgnoreCase))
                 .Sum(x => x.amount);
             var totalCredit = transactions
-                .Where(x => string.Equals(x.transactionType, "credit", StringComparison.OrdinalIgnoreCase))
+                .Where(x => string.Equals(GetEffectiveTransactionType(x, balanceSideLookup), "credit", StringComparison.OrdinalIgnoreCase))
                 .Sum(x => x.amount);
             var closingBalance = totalDebit - totalCredit;
 
@@ -1615,16 +1617,17 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             foreach (var transaction in transactions)
             {
                 serial++;
+                var effectiveTransactionType = GetEffectiveTransactionType(transaction, balanceSideLookup);
                 var displayTransactionAt = ConvertToDisplayTime(transaction.transactionAt);
                 worksheet.Cells[detailRow, 1].Value = serial;
                 worksheet.Cells[detailRow, 2].Value = displayTransactionAt;
                 worksheet.Cells[detailRow, 2].Style.Numberformat.Format = "d/M/yy";
                 worksheet.Cells[detailRow, 3].Value = string.IsNullOrWhiteSpace(transaction.note)
-                    ? BuildLedgerDescription(transaction.transactionType, ledgerAccountCode)
+                    ? BuildLedgerDescription(effectiveTransactionType, ledgerAccountCode)
                     : transaction.note;
                 worksheet.Cells[detailRow, 4].Value = string.IsNullOrWhiteSpace(transaction.accountType) ? ledgerAccountCode : transaction.accountType;
-                worksheet.Cells[detailRow, 5].Value = string.Equals(transaction.transactionType, "debt", StringComparison.OrdinalIgnoreCase) ? transaction.amount : 0;
-                worksheet.Cells[detailRow, 6].Value = string.Equals(transaction.transactionType, "credit", StringComparison.OrdinalIgnoreCase) ? transaction.amount : 0;
+                worksheet.Cells[detailRow, 5].Value = string.Equals(effectiveTransactionType, "debt", StringComparison.OrdinalIgnoreCase) ? transaction.amount : 0;
+                worksheet.Cells[detailRow, 6].Value = string.Equals(effectiveTransactionType, "credit", StringComparison.OrdinalIgnoreCase) ? transaction.amount : 0;
                 worksheet.Cells[detailRow, 7].Value = transaction.note ?? string.Empty;
                 detailRow++;
             }
@@ -1719,6 +1722,88 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 .Select(x => x?.accountType)
                 .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
                 ?.Trim();
+        }
+
+        private async Task<Dictionary<string, string>> LoadAccountTypeBalanceSideLookupAsync(IEnumerable<CustomerDebtTransaction> transactions)
+        {
+            var accountTypeCodes = transactions?
+                .Select(x => x?.accountType?.Trim())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (accountTypeCodes == null || accountTypeCodes.Count == 0)
+            {
+                return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            var filter = Builders<BsonDocument>.Filter.And(
+                Builders<BsonDocument>.Filter.In("accountType", accountTypeCodes),
+                Builders<BsonDocument>.Filter.Ne("isDelete", true),
+                Builders<BsonDocument>.Filter.Ne("isDeleted", true)
+            );
+
+            var docs = await _apiDocumentDbContext.AccountTypes
+                .Find(filter)
+                .ToListAsync();
+
+            return docs
+                .Select(doc => new
+                {
+                    AccountType = GetBsonString(doc, "accountType")?.Trim(),
+                    BalanceSide = GetBsonString(doc, "balanceSide")?.Trim().ToLowerInvariant(),
+                })
+                .Where(x => !string.IsNullOrWhiteSpace(x.AccountType) && !string.IsNullOrWhiteSpace(x.BalanceSide))
+                .GroupBy(x => x.AccountType, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(x => x.Key, x => x.First().BalanceSide, StringComparer.OrdinalIgnoreCase);
+        }
+
+        private string GetEffectiveTransactionType(CustomerDebtTransaction transaction, IReadOnlyDictionary<string, string> balanceSideLookup)
+        {
+            var accountType = transaction?.accountType?.Trim();
+            if (!string.IsNullOrWhiteSpace(accountType)
+                && balanceSideLookup != null
+                && balanceSideLookup.TryGetValue(accountType, out var balanceSide))
+            {
+                if (string.Equals(balanceSide, "debit", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "debt";
+                }
+
+                if (string.Equals(balanceSide, "credit", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "credit";
+                }
+            }
+
+            var transactionType = transaction?.transactionType?.Trim().ToLowerInvariant();
+            if (transactionType == "debt" || transactionType == "credit")
+            {
+                return transactionType;
+            }
+
+            return ResolveTransactionTypeFromAccountType(accountType, "debt");
+        }
+
+        private string ResolveTransactionTypeFromAccountType(string accountType, string fallback = "debt")
+        {
+            var normalized = (accountType ?? string.Empty).Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return fallback;
+            }
+
+            if (normalized.StartsWith("1") || normalized.Contains("131"))
+            {
+                return "debt";
+            }
+
+            if (normalized.StartsWith("3") || normalized.Contains("331"))
+            {
+                return "credit";
+            }
+
+            return fallback;
         }
 
         private string BuildLedgerDescription(string transactionType, string ledgerAccountCode)
