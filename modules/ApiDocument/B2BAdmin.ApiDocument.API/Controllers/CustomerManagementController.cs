@@ -159,6 +159,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                     var accountType = GetBsonString(doc, "accountType");
                     var accountName = GetBsonString(doc, "accountName");
                     var accountNameLocal = GetBsonString(doc, "accountNameLocal");
+                    var balanceSide = GetBsonString(doc, "balanceSide");
                     var displayName = !string.IsNullOrWhiteSpace(accountNameLocal) ? accountNameLocal : accountName;
 
                     return new
@@ -168,6 +169,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                         accountType,
                         accountName,
                         accountNameLocal,
+                        balanceSide,
                     };
                 })
                 .Where(x => !string.IsNullOrWhiteSpace(x.value))
@@ -236,6 +238,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 accountType = GetBsonString(doc, "accountType"),
                 accountName = GetBsonString(doc, "accountName"),
                 accountNameLocal = GetBsonString(doc, "accountNameLocal"),
+                balanceSide = GetBsonString(doc, "balanceSide"),
                 updatedAt = GetBsonDateTime(doc, "updatedAt")
             }).ToList();
 
@@ -265,6 +268,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
 
             var accountName = (payload.accountName ?? string.Empty).Trim();
             var accountNameLocal = (payload.accountNameLocal ?? string.Empty).Trim();
+            var balanceSide = NormalizeBalanceSide(payload.balanceSide);
             var now = DateTime.UtcNow;
 
             var requestedId = (payload.id ?? string.Empty).Trim();
@@ -294,6 +298,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 existing["accountType"] = accountType;
                 existing["accountName"] = accountName;
                 existing["accountNameLocal"] = accountNameLocal;
+                existing["balanceSide"] = balanceSide;
                 existing["updatedAt"] = now;
 
                 if (!existing.Contains("createdAt"))
@@ -314,6 +319,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 ["accountType"] = accountType,
                 ["accountName"] = accountName,
                 ["accountNameLocal"] = accountNameLocal,
+                ["balanceSide"] = balanceSide,
                 ["isDelete"] = false,
                 ["isDeleted"] = false,
                 ["createdAt"] = now,
@@ -2059,12 +2065,24 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             public string newValue { get; set; }
         }
 
+        private string NormalizeBalanceSide(string value)
+        {
+            var normalized = (value ?? string.Empty).Trim().ToLowerInvariant();
+            return normalized switch
+            {
+                "debit" => "debit",
+                "credit" => "credit",
+                _ => string.Empty,
+            };
+        }
+
         public class AccountTypeConfigUpsertRequest
         {
             public string id { get; set; }
             public string accountType { get; set; }
             public string accountName { get; set; }
             public string accountNameLocal { get; set; }
+            public string balanceSide { get; set; }
         }
 
     }
