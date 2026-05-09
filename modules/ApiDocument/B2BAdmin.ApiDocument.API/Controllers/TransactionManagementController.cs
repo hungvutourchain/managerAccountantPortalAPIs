@@ -1631,31 +1631,6 @@ namespace B2BAdmin.ApiDocument.API.Controllers
 
             var minimumLedgerRows = 8;
             while ((detailRow - (startRow + 1)) < minimumLedgerRows)
-
-        private string ResolveExportAccountTypeCode(IEnumerable<CustomerDebtTransaction> transactions)
-        {
-            if (transactions == null)
-            {
-                return null;
-            }
-
-            return transactions
-                .Select(x => x?.accountType)
-                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
-                ?.Trim();
-        }
-
-        private string BuildLedgerDescription(string transactionType, string ledgerAccountCode)
-        {
-            if (ledgerAccountCode != "131" && ledgerAccountCode != "331")
-            {
-                return $"PHAT SINH TK {ledgerAccountCode}";
-            }
-
-            return string.Equals(transactionType, "credit", StringComparison.OrdinalIgnoreCase)
-                ? (ledgerAccountCode == "131" ? "THU TIEN CONG NO" : "THANH TOAN CONG NO")
-                : (ledgerAccountCode == "131" ? "PHAT SINH CONG NO PHAI THU" : "PHAT SINH CONG NO PHAI TRA");
-        }
             {
                 worksheet.Cells[detailRow, 1].Value = string.Empty;
                 worksheet.Cells[detailRow, 2].Value = string.Empty;
@@ -1731,6 +1706,31 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             worksheet.Cells[signNoteRow, 5].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
 
             return package.GetAsByteArray();
+        }
+
+        private string ResolveExportAccountTypeCode(IEnumerable<CustomerDebtTransaction> transactions)
+        {
+            if (transactions == null)
+            {
+                return null;
+            }
+
+            return transactions
+                .Select(x => x?.accountType)
+                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+                ?.Trim();
+        }
+
+        private string BuildLedgerDescription(string transactionType, string ledgerAccountCode)
+        {
+            if (ledgerAccountCode != "131" && ledgerAccountCode != "331")
+            {
+                return $"PHAT SINH TK {ledgerAccountCode}";
+            }
+
+            return string.Equals(transactionType, "credit", StringComparison.OrdinalIgnoreCase)
+                ? (ledgerAccountCode == "131" ? "THU TIEN CONG NO" : "THANH TOAN CONG NO")
+                : (ledgerAccountCode == "131" ? "PHAT SINH CONG NO PHAI THU" : "PHAT SINH CONG NO PHAI TRA");
         }
 
         public class CreateDebtTransactionRequest
