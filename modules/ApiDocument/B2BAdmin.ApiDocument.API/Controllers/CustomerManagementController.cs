@@ -2,15 +2,20 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using B2BAdmin.ApiDocument.Domains.Models;
 using B2BAdmin.ApiDocument.Infrastructure;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using OfficeOpenXml;
 using OfficeOpenXml.Style;
 using System.Drawing;
+using System.Globalization;
 
 namespace B2BAdmin.ApiDocument.API.Controllers
 {
@@ -19,10 +24,14 @@ namespace B2BAdmin.ApiDocument.API.Controllers
     public class CustomerManagementController : ControllerBase
     {
         private readonly ApiDocumentDbContext _apiDocumentDbContext;
+        private readonly IHostingEnvironment _webHostEnvironment;
+        private readonly IConfiguration _configuration;
 
-        public CustomerManagementController(ApiDocumentDbContext apiDocumentDbContext)
+        public CustomerManagementController(ApiDocumentDbContext apiDocumentDbContext, IHostingEnvironment webHostEnvironment, IConfiguration configuration)
         {
             _apiDocumentDbContext = apiDocumentDbContext;
+            _webHostEnvironment = webHostEnvironment;
+            _configuration = configuration;
         }
 
         [HttpGet("customers")]
@@ -113,6 +122,359 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 totalDebt,
                 totalCredit
             });
+        }
+
+        [HttpGet("reports/customer-debt-summary")]
+        public async Task<IActionResult> GetCustomerDebtReportSummaryAsync(
+            [FromQuery] string status = null,
+            [FromQuery] string riskLevel = null,
+            [FromQuery] DateTime? fromDate = null,
+            [FromQuery] DateTime? toDate = null)
+        {
+            var filteredDebtSource = await GetFilteredDebtSourceAsync(null, status, riskLevel, fromDate, toDate);
+
+            var totalCustomers = filteredDebtSource.Count;
+            var activeCustomers = filteredDebtSource.Count(x => string.Equals(x.status, "active", StringComparison.OrdinalIgnoreCase));
+            var warningCustomers = filteredDebtSource.Count(x => string.Equals(x.riskLevel, "warning", StringComparison.OrdinalIgnoreCase));
+            var blockedCustomers = filteredDebtSource.Count(x => string.Equals(x.status, "blocked", StringComparison.OrdinalIgnoreCase));
+            var totalDebt = filteredDebtSource.Sum(x => x.debtAmount);
+            var totalCredit = filteredDebtSource.Sum(x => x.creditAmount);
+
+            var positiveBalances = filteredDebtSource
+                .Select(GetNetBalance)
+                .Where(x => x > 0)
+                .ToList();
+
+            var negativeBalances = filteredDebtSource
+                .Select(GetNetBalance)
+                .Where(x => x < 0)
+                .Select(Math.Abs)
+                .ToList();
+
+            var totalReceivable = positiveBalances.Sum();
+            var totalPayable = negativeBalances.Sum();
+            var netExposure = totalReceivable - totalPayable;
+
+            var highRiskExposure = filteredDebtSource
+                .Where(x => string.Equals(x.riskLevel, "warning", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(x.riskLevel, "critical", StringComparison.OrdinalIgnoreCase))
+                .Select(GetNetBalance)
+                .Where(x => x > 0)
+                .Sum();
+
+            var agingBuckets = filteredDebtSource
+                .Where(x => GetNetBalance(x) > 0)
+                .Select(x => new { net = GetNetBalance(x), agingBucket = GetAgingBucket(GetAgingDays(x.lastTransactionAt)) })
+                .GroupBy(x => x.agingBucket)
+                .Select(x => new
+                {
+                    bucket = x.Key,
+                    amount = x.Sum(y => y.net),
+                    customers = x.Count()
+                })
+                .ToList();
+
+            var topDebtors = filteredDebtSource
+                .Select(x => new
+                {
+                    id = x.Id,
+                    code = x.code,
+                    name = x.name,
+                    status = x.status,
+                    riskLevel = x.riskLevel,
+                    agingDays = GetAgingDays(x.lastTransactionAt),
+                    lastTransactionAt = x.lastTransactionAt,
+                    netBalance = GetNetBalance(x)
+                })
+                .Where(x => x.netBalance > 0)
+                .OrderByDescending(x => x.netBalance)
+                .ThenByDescending(x => x.agingDays)
+                .Take(5)
+                .ToList();
+
+            return Ok(new
+            {
+                generatedAt = DateTime.UtcNow,
+                filters = new
+                {
+                    status = string.IsNullOrWhiteSpace(status) ? "all" : status.Trim(),
+                    riskLevel = string.IsNullOrWhiteSpace(riskLevel) ? "all" : riskLevel.Trim(),
+                    fromDate = fromDate?.Date.ToString("yyyy-MM-dd"),
+                    toDate = toDate?.Date.ToString("yyyy-MM-dd"),
+                },
+                customerSummary = new
+                {
+                    totalCustomers,
+                    activeCustomers,
+                    warningCustomers,
+                    blockedCustomers,
+                    totalDebt,
+                    totalCredit,
+                },
+                debtOverview = new
+                {
+                    totalReceivable,
+                    totalPayable,
+                    netExposure,
+                    highRiskExposure,
+                    customerCount = filteredDebtSource.Count,
+                    debtorCount = filteredDebtSource.Count(x => GetNetBalance(x) > 0),
+                    creditorCount = filteredDebtSource.Count(x => GetNetBalance(x) < 0),
+                    agingBuckets,
+                    topDebtors,
+                }
+            });
+        }
+
+        [HttpGet("reports/customer-debt-details")]
+        public async Task<IActionResult> GetCustomerDebtReportDetailsAsync(
+            [FromQuery] string search = null,
+            [FromQuery] string status = null,
+            [FromQuery] string riskLevel = null,
+            [FromQuery] DateTime? fromDate = null,
+            [FromQuery] DateTime? toDate = null,
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10,
+            [FromQuery] string sortBy = "netBalance",
+            [FromQuery] string sortDirection = "desc")
+        {
+            page = page < 1 ? 1 : page;
+            pageSize = pageSize < 1 ? 10 : Math.Min(pageSize, 100);
+
+            var filteredData = await GetFilteredDebtSourceAsync(search, status, riskLevel, fromDate, toDate);
+
+            var projected = filteredData
+                .Select(x =>
+                {
+                    var agingDays = GetAgingDays(x.lastTransactionAt);
+                    var netBalance = GetNetBalance(x);
+
+                    return new DebtListItemDto
+                    {
+                        id = x.Id,
+                        code = x.code,
+                        name = x.name,
+                        phone = x.phone,
+                        status = x.status,
+                        riskLevel = x.riskLevel,
+                        debtAmount = x.debtAmount,
+                        creditAmount = x.creditAmount,
+                        netBalance = netBalance,
+                        agingDays = agingDays,
+                        agingBucket = GetAgingBucket(agingDays),
+                        lastTransactionAt = x.lastTransactionAt,
+                        updatedAt = x.updatedAt,
+                    };
+                })
+                .ToList();
+
+            var sorted = SortDebtItems(projected, sortBy, sortDirection);
+            var totalItems = sorted.Count;
+            var items = sorted
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .ToList();
+
+            return Ok(new
+            {
+                page,
+                pageSize,
+                totalItems,
+                totalPages = (int)Math.Ceiling(totalItems / (double)pageSize),
+                items
+            });
+        }
+
+        [HttpGet("reports/customer-debt-export")]
+        public async Task<IActionResult> ExportCustomerDebtReportAsync(
+            [FromQuery] string search = null,
+            [FromQuery] string status = null,
+            [FromQuery] string riskLevel = null,
+            [FromQuery] DateTime? fromDate = null,
+            [FromQuery] DateTime? toDate = null,
+            [FromQuery] string sortBy = "netBalance",
+            [FromQuery] string sortDirection = "desc")
+        {
+            var filteredData = await GetFilteredDebtSourceAsync(search, status, riskLevel, fromDate, toDate);
+
+            var projected = filteredData
+                .Select(x =>
+                {
+                    var agingDays = GetAgingDays(x.lastTransactionAt);
+                    var netBalance = GetNetBalance(x);
+
+                    return new DebtListItemDto
+                    {
+                        id = x.Id,
+                        code = x.code,
+                        name = x.name,
+                        phone = x.phone,
+                        status = x.status,
+                        riskLevel = x.riskLevel,
+                        debtAmount = x.debtAmount,
+                        creditAmount = x.creditAmount,
+                        netBalance = netBalance,
+                        agingDays = agingDays,
+                        agingBucket = GetAgingBucket(agingDays),
+                        lastTransactionAt = x.lastTransactionAt,
+                        updatedAt = x.updatedAt,
+                    };
+                })
+                .ToList();
+
+            var sorted = SortDebtItems(projected, sortBy, sortDirection);
+            var fileBytes = BuildCustomerDebtReportExcelFile(sorted, status, riskLevel, fromDate, toDate, search);
+            var exportNow = ConvertToDisplayTime(DateTime.UtcNow);
+            var fileName = $"customer-debt-report-{exportNow:yyyyMMddHHmmss}.xlsx";
+            var actor = GetCurrentActor();
+            var exportHistoryId = Guid.NewGuid().ToString("N");
+            var exportDirectory = EnsureCustomerDebtReportExportHistoryDirectory(exportNow, out var relativeDirectory);
+            var storedFileName = BuildStoredFileName(fileName, exportHistoryId);
+            var absolutePath = Path.Combine(exportDirectory, storedFileName);
+            await System.IO.File.WriteAllBytesAsync(absolutePath, fileBytes);
+
+            var exportHistory = new CustomerDebtReportExportHistory
+            {
+                id = exportHistoryId,
+                fileName = fileName,
+                storedFileName = storedFileName,
+                relativePath = BuildCustomerDebtReportExportHistoryRelativePath(relativeDirectory, storedFileName),
+                contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                size = fileBytes.LongLength,
+                status = NormalizeText(status),
+                riskLevel = NormalizeText(riskLevel),
+                search = NormalizeText(search),
+                sortBy = NormalizeText(sortBy),
+                sortDirection = NormalizeText(sortDirection),
+                fromDate = fromDate,
+                toDate = toDate,
+                recordCount = sorted.Count,
+                exportedAt = DateTime.UtcNow,
+                exportedBy = actor,
+            };
+            await _apiDocumentDbContext.CustomerDebtReportExportHistories.InsertOneAsync(exportHistory);
+
+            return File(fileBytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
+        }
+
+        [HttpGet("reports/customer-debt-export-history")]
+        public async Task<IActionResult> GetCustomerDebtReportExportHistoryAsync(
+            [FromQuery] string search = null,
+            [FromQuery] string exportedBy = null,
+            [FromQuery] DateTime? fromDate = null,
+            [FromQuery] DateTime? toDate = null,
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 20,
+            [FromQuery] string sortBy = "exportedAt",
+            [FromQuery] string sortDirection = "desc")
+        {
+            page = page < 1 ? 1 : page;
+            pageSize = pageSize < 1 ? 20 : Math.Min(pageSize, 200);
+
+            var historyFilterBuilder = Builders<CustomerDebtReportExportHistory>.Filter;
+            var historyFilters = new List<FilterDefinition<CustomerDebtReportExportHistory>>
+            {
+                historyFilterBuilder.Eq(x => x.isDeleted, false),
+            };
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var keyword = Regex.Escape(search.Trim());
+                historyFilters.Add(historyFilterBuilder.Or(
+                    historyFilterBuilder.Regex(x => x.fileName, new BsonRegularExpression(keyword, "i")),
+                    historyFilterBuilder.Regex(x => x.search, new BsonRegularExpression(keyword, "i")),
+                    historyFilterBuilder.Regex(x => x.status, new BsonRegularExpression(keyword, "i")),
+                    historyFilterBuilder.Regex(x => x.riskLevel, new BsonRegularExpression(keyword, "i"))));
+            }
+
+            if (!string.IsNullOrWhiteSpace(exportedBy))
+            {
+                historyFilters.Add(historyFilterBuilder.Regex(x => x.exportedBy, new BsonRegularExpression(Regex.Escape(exportedBy.Trim()), "i")));
+            }
+
+            if (fromDate.HasValue)
+            {
+                historyFilters.Add(historyFilterBuilder.Gte(x => x.exportedAt, fromDate.Value.Date));
+            }
+
+            if (toDate.HasValue)
+            {
+                historyFilters.Add(historyFilterBuilder.Lt(x => x.exportedAt, toDate.Value.Date.AddDays(1)));
+            }
+
+            var historyFilter = historyFilterBuilder.And(historyFilters);
+            var isDesc = string.Equals(sortDirection, "desc", StringComparison.OrdinalIgnoreCase);
+            SortDefinition<CustomerDebtReportExportHistory> sortDefinition;
+            switch ((sortBy ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "filename":
+                    sortDefinition = isDesc
+                        ? Builders<CustomerDebtReportExportHistory>.Sort.Descending(x => x.fileName)
+                        : Builders<CustomerDebtReportExportHistory>.Sort.Ascending(x => x.fileName);
+                    break;
+                case "size":
+                    sortDefinition = isDesc
+                        ? Builders<CustomerDebtReportExportHistory>.Sort.Descending(x => x.size)
+                        : Builders<CustomerDebtReportExportHistory>.Sort.Ascending(x => x.size);
+                    break;
+                case "exportedby":
+                    sortDefinition = isDesc
+                        ? Builders<CustomerDebtReportExportHistory>.Sort.Descending(x => x.exportedBy)
+                        : Builders<CustomerDebtReportExportHistory>.Sort.Ascending(x => x.exportedBy);
+                    break;
+                default:
+                    sortDefinition = isDesc
+                        ? Builders<CustomerDebtReportExportHistory>.Sort.Descending(x => x.exportedAt)
+                        : Builders<CustomerDebtReportExportHistory>.Sort.Ascending(x => x.exportedAt);
+                    break;
+            }
+
+            var totalItems = (int)await _apiDocumentDbContext.CustomerDebtReportExportHistories.CountDocumentsAsync(historyFilter);
+            var items = await _apiDocumentDbContext.CustomerDebtReportExportHistories
+                .Find(historyFilter)
+                .Sort(sortDefinition)
+                .Skip((page - 1) * pageSize)
+                .Limit(pageSize)
+                .ToListAsync();
+
+            return Ok(new
+            {
+                page,
+                pageSize,
+                totalItems,
+                totalPages = (int)Math.Ceiling(totalItems / (double)pageSize),
+                items,
+            });
+        }
+
+        [HttpGet("reports/customer-debt-export-history/{historyId}/download")]
+        public async Task<IActionResult> DownloadCustomerDebtReportExportHistoryAsync(string historyId)
+        {
+            if (string.IsNullOrWhiteSpace(historyId))
+            {
+                return BadRequest("Invalid historyId");
+            }
+
+            var history = await _apiDocumentDbContext.CustomerDebtReportExportHistories
+                .Find(x => x.id == historyId && !x.isDeleted)
+                .FirstOrDefaultAsync();
+            if (history == null)
+            {
+                return NotFound("Report export history not found");
+            }
+
+            var filePath = ResolveCustomerDebtReportExportHistoryAbsolutePath(history);
+            if (!System.IO.File.Exists(filePath))
+            {
+                return NotFound("Report export file not found");
+            }
+
+            return PhysicalFile(
+                filePath,
+                string.IsNullOrWhiteSpace(history.contentType)
+                    ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    : history.contentType,
+                string.IsNullOrWhiteSpace(history.fileName) ? "customer-debt-report.xlsx" : history.fileName);
         }
 
         [HttpGet("account-types")]
@@ -364,7 +726,6 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 {
                     return BadRequest("Invalid payload");
                 }
-
                 var now = DateTime.UtcNow;
                 var actor = GetCurrentActor();
                 payload.updatedAt = now;
@@ -1298,10 +1659,13 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             };
         }
 
-        private async Task<List<CustomerAccount>> GetFilteredDebtSourceAsync(string search, string status, string riskLevel)
+        private async Task<List<CustomerAccount>> GetFilteredDebtSourceAsync(string search, string status, string riskLevel, DateTime? fromDate = null, DateTime? toDate = null)
         {
             var filterBuilder = Builders<CustomerAccount>.Filter;
             var filters = new List<FilterDefinition<CustomerAccount>>();
+
+            filters.Add(filterBuilder.Eq(x => x.isDeleted, false));
+            filters.Add(filterBuilder.Ne("isDelete", true));
 
             if (!string.IsNullOrWhiteSpace(search))
             {
@@ -1324,11 +1688,251 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 filters.Add(filterBuilder.Eq(x => x.riskLevel, riskLevel));
             }
 
+            var normalizedFromDate = fromDate?.Date;
+            var normalizedToDate = toDate?.Date.AddDays(1).AddTicks(-1);
+
+            if (normalizedFromDate.HasValue || normalizedToDate.HasValue)
+            {
+                var transactionFilterBuilder = Builders<CustomerDebtTransaction>.Filter;
+                var transactionFilters = new List<FilterDefinition<CustomerDebtTransaction>>
+                {
+                    transactionFilterBuilder.Eq(x => x.isDeleted, false)
+                };
+
+                if (normalizedFromDate.HasValue)
+                {
+                    transactionFilters.Add(transactionFilterBuilder.Gte(x => x.transactionAt, normalizedFromDate.Value));
+                }
+
+                if (normalizedToDate.HasValue)
+                {
+                    transactionFilters.Add(transactionFilterBuilder.Lte(x => x.transactionAt, normalizedToDate.Value));
+                }
+
+                var matchingCustomerIds = await _apiDocumentDbContext.CustomerDebtTransactions
+                    .Find(transactionFilterBuilder.And(transactionFilters))
+                    .Project(x => x.customerId)
+                    .ToListAsync();
+
+                var distinctCustomerIds = matchingCustomerIds
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+
+                if (distinctCustomerIds.Count == 0)
+                {
+                    return new List<CustomerAccount>();
+                }
+
+                filters.Add(filterBuilder.In(x => x.Id, distinctCustomerIds));
+            }
+
             var finalFilter = filters.Count > 0 ? filterBuilder.And(filters) : filterBuilder.Empty;
 
             return await _apiDocumentDbContext.CustomerAccounts
                 .Find(finalFilter)
                 .ToListAsync();
+        }
+
+        private byte[] BuildCustomerDebtReportExcelFile(
+            List<DebtListItemDto> items,
+            string status,
+            string riskLevel,
+            DateTime? fromDate,
+            DateTime? toDate,
+            string search)
+        {
+            ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+
+            using var package = new ExcelPackage();
+            var summarySheet = package.Workbook.Worksheets.Add("ReportSummary");
+            var detailSheet = package.Workbook.Worksheets.Add("CustomerDetails");
+
+            var totalDebt = items.Sum(x => x.debtAmount);
+            var totalCredit = items.Sum(x => x.creditAmount);
+            var totalNet = items.Sum(x => x.netBalance);
+            var topExposure = items.Count == 0 ? 0 : items.Max(x => x.netBalance);
+            var displayNow = ConvertToDisplayTime(DateTime.UtcNow);
+
+            summarySheet.Cells.Style.Font.Name = "Times New Roman";
+            summarySheet.Cells[1, 1, 1, 4].Merge = true;
+            summarySheet.Cells[1, 1].Value = "CUSTOMER DEBT REPORT / BAO CAO CONG NO KHACH HANG";
+            summarySheet.Cells[1, 1].Style.Font.Bold = true;
+            summarySheet.Cells[1, 1].Style.Font.Size = 16;
+            summarySheet.Cells[2, 1, 2, 4].Merge = true;
+            summarySheet.Cells[2, 1].Value = $"Generated at / Tao luc: {displayNow:dd/MM/yyyy HH:mm}";
+
+            summarySheet.Cells[4, 1].Value = "Status";
+            summarySheet.Cells[4, 2].Value = string.IsNullOrWhiteSpace(status) ? "all" : status;
+            summarySheet.Cells[5, 1].Value = "Risk level";
+            summarySheet.Cells[5, 2].Value = string.IsNullOrWhiteSpace(riskLevel) ? "all" : riskLevel;
+            summarySheet.Cells[6, 1].Value = "From date";
+            summarySheet.Cells[6, 2].Value = fromDate.HasValue ? ConvertToDisplayTime(fromDate.Value).ToString("dd/MM/yyyy") : "-";
+            summarySheet.Cells[7, 1].Value = "To date";
+            summarySheet.Cells[7, 2].Value = toDate.HasValue ? ConvertToDisplayTime(toDate.Value).ToString("dd/MM/yyyy") : "-";
+            summarySheet.Cells[8, 1].Value = "Search";
+            summarySheet.Cells[8, 2].Value = string.IsNullOrWhiteSpace(search) ? "-" : search.Trim();
+
+            summarySheet.Cells[10, 1].Value = "Customer count";
+            summarySheet.Cells[10, 2].Value = items.Count;
+            summarySheet.Cells[11, 1].Value = "Total debt";
+            summarySheet.Cells[11, 2].Value = totalDebt;
+            summarySheet.Cells[12, 1].Value = "Total credit";
+            summarySheet.Cells[12, 2].Value = totalCredit;
+            summarySheet.Cells[13, 1].Value = "Net exposure";
+            summarySheet.Cells[13, 2].Value = totalNet;
+            summarySheet.Cells[14, 1].Value = "Top exposure";
+            summarySheet.Cells[14, 2].Value = topExposure;
+            summarySheet.Column(1).Width = 18;
+            summarySheet.Column(2).Width = 28;
+            summarySheet.Column(3).Width = 18;
+            summarySheet.Column(4).Width = 18;
+            summarySheet.Cells[11, 2, 14, 2].Style.Numberformat.Format = "#,##0";
+
+            detailSheet.Cells.Style.Font.Name = "Times New Roman";
+            detailSheet.Cells[1, 1, 1, 9].Merge = true;
+            detailSheet.Cells[1, 1].Value = "CUSTOMER DEBT DETAILS / CHI TIET BAO CAO CONG NO";
+            detailSheet.Cells[1, 1].Style.Font.Bold = true;
+            detailSheet.Cells[1, 1].Style.Font.Size = 15;
+
+            var headers = new[] { "Code", "Customer", "Phone", "Status", "Risk", "Debt", "Credit", "Net", "Last Txn" };
+            for (var index = 0; index < headers.Length; index++)
+            {
+                detailSheet.Cells[3, index + 1].Value = headers[index];
+                detailSheet.Cells[3, index + 1].Style.Font.Bold = true;
+            }
+
+            var row = 4;
+            foreach (var item in items)
+            {
+                detailSheet.Cells[row, 1].Value = item.code;
+                detailSheet.Cells[row, 2].Value = item.name;
+                detailSheet.Cells[row, 3].Value = item.phone;
+                detailSheet.Cells[row, 4].Value = item.status;
+                detailSheet.Cells[row, 5].Value = item.riskLevel;
+                detailSheet.Cells[row, 6].Value = item.debtAmount;
+                detailSheet.Cells[row, 7].Value = item.creditAmount;
+                detailSheet.Cells[row, 8].Value = item.netBalance;
+                detailSheet.Cells[row, 9].Value = item.lastTransactionAt.HasValue ? ConvertToDisplayTime(item.lastTransactionAt.Value).ToString("dd/MM/yyyy") : string.Empty;
+                row++;
+            }
+
+            detailSheet.Column(1).Width = 14;
+            detailSheet.Column(2).Width = 34;
+            detailSheet.Column(3).Width = 18;
+            detailSheet.Column(4).Width = 14;
+            detailSheet.Column(5).Width = 14;
+            detailSheet.Column(6).Width = 16;
+            detailSheet.Column(7).Width = 16;
+            detailSheet.Column(8).Width = 16;
+            detailSheet.Column(9).Width = 16;
+            if (row > 4)
+            {
+                detailSheet.Cells[4, 6, row - 1, 8].Style.Numberformat.Format = "#,##0";
+            }
+
+            return package.GetAsByteArray();
+        }
+
+        private string EnsureCustomerDebtReportExportHistoryDirectory(DateTime exportedAt, out string relativeDirectory)
+        {
+            relativeDirectory = exportedAt.ToString("ddMMMyyyy", CultureInfo.InvariantCulture);
+            var path = Path.Combine(GetCustomerDebtReportExportHistoryRootPath(), relativeDirectory.Replace("/", Path.DirectorySeparatorChar.ToString()));
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        private string BuildCustomerDebtReportExportHistoryRelativePath(string relativeDirectory, string storedFileName)
+        {
+            return Path.Combine(relativeDirectory ?? string.Empty, storedFileName ?? string.Empty).Replace("\\", "/");
+        }
+
+        private string ResolveCustomerDebtReportExportHistoryAbsolutePath(CustomerDebtReportExportHistory history)
+        {
+            if (history == null)
+            {
+                return Path.Combine(GetCustomerDebtReportExportHistoryRootPath(), string.Empty);
+            }
+
+            if (!string.IsNullOrWhiteSpace(history.relativePath))
+            {
+                if (Path.IsPathRooted(history.relativePath))
+                {
+                    return history.relativePath;
+                }
+
+                var normalizedRelativePath = history.relativePath.Replace("/", Path.DirectorySeparatorChar.ToString()).TrimStart(Path.DirectorySeparatorChar);
+                return Path.Combine(GetCustomerDebtReportExportHistoryRootPath(), normalizedRelativePath);
+            }
+
+            return Path.Combine(GetCustomerDebtReportExportHistoryRootPath(), history.storedFileName ?? GetSafeOriginalFileName(history.fileName));
+        }
+
+        private string GetCustomerDebtReportExportHistoryRootPath()
+        {
+            var configuredPath = _configuration["AttachmentStorage:DebtExportHistoryRootPath"];
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                var trimmed = configuredPath.Trim();
+                var basePath = Path.IsPathRooted(trimmed)
+                    ? trimmed
+                    : Path.GetFullPath(trimmed, _webHostEnvironment.ContentRootPath);
+                return Path.Combine(basePath, "ReportHistory");
+            }
+
+            return Path.Combine(_webHostEnvironment.ContentRootPath, "AppData", "DebtTransactionFiles", "ExportHistory", "ReportHistory");
+        }
+
+        private string GetSafeOriginalFileName(string fileName)
+        {
+            var source = string.IsNullOrWhiteSpace(fileName) ? "upload.bin" : fileName.Trim();
+            var invalidChars = Path.GetInvalidFileNameChars();
+            var sanitized = new string(source.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray()).Trim();
+            return string.IsNullOrWhiteSpace(sanitized) ? "upload.bin" : sanitized;
+        }
+
+        private string BuildStoredFileName(string originalFileName, string uniqueId)
+        {
+            var safeOriginalName = GetSafeOriginalFileName(originalFileName);
+            var extension = SanitizeFileExtension(Path.GetExtension(safeOriginalName) ?? string.Empty);
+            var baseName = Path.GetFileNameWithoutExtension(safeOriginalName) ?? "file";
+            var normalized = baseName.Normalize(NormalizationForm.FormD);
+            var builder = new StringBuilder();
+            foreach (var ch in normalized)
+            {
+                if (CharUnicodeInfo.GetUnicodeCategory(ch) != UnicodeCategory.NonSpacingMark)
+                {
+                    builder.Append(ch);
+                }
+            }
+
+            var asciiBaseName = builder.ToString().Normalize(NormalizationForm.FormC);
+            var slug = Regex.Replace(asciiBaseName, "[^A-Za-z0-9]+", "-").Trim('-').ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(slug))
+            {
+                slug = "file";
+            }
+
+            return string.IsNullOrWhiteSpace(extension)
+                ? $"{slug}-{uniqueId}"
+                : $"{slug}-{uniqueId}{extension}";
+        }
+
+        private string SanitizeFileExtension(string extension)
+        {
+            if (string.IsNullOrWhiteSpace(extension))
+            {
+                return string.Empty;
+            }
+
+            var lowered = extension.Trim().ToLowerInvariant();
+            if (!lowered.StartsWith('.'))
+            {
+                lowered = $".{lowered}";
+            }
+
+            var cleaned = Regex.Replace(lowered, "[^a-z0-9.]", string.Empty);
+            return cleaned == "." ? string.Empty : cleaned;
         }
 
         private byte[] BuildDebtCustomerExcelFile(CustomerAccount customer, List<CustomerDebtTransaction> transactions)

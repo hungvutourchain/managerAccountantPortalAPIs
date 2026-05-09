@@ -420,4 +420,84 @@ namespace B2BAdmin.ApiDocument.Domains.Models
         [JsonPropertyName("deletedBy")]
         public string? deletedBy { get; set; }
     }
+
+    [BsonIgnoreExtraElements]
+    public class CustomerDebtReportExportHistory
+    {
+        [BsonElement("id")]
+        [JsonPropertyName("id")]
+        public string? id { get; set; }
+
+        [BsonElement("fileName")]
+        [JsonPropertyName("fileName")]
+        public string? fileName { get; set; }
+
+        [BsonElement("storedFileName")]
+        [JsonPropertyName("storedFileName")]
+        public string? storedFileName { get; set; }
+
+        [BsonElement("relativePath")]
+        [JsonPropertyName("relativePath")]
+        public string? relativePath { get; set; }
+
+        [BsonElement("contentType")]
+        [JsonPropertyName("contentType")]
+        public string? contentType { get; set; }
+
+        [BsonElement("size")]
+        [JsonPropertyName("size")]
+        public long size { get; set; }
+
+        [BsonElement("status")]
+        [JsonPropertyName("status")]
+        public string? status { get; set; }
+
+        [BsonElement("riskLevel")]
+        [JsonPropertyName("riskLevel")]
+        public string? riskLevel { get; set; }
+
+        [BsonElement("search")]
+        [JsonPropertyName("search")]
+        public string? search { get; set; }
+
+        [BsonElement("sortBy")]
+        [JsonPropertyName("sortBy")]
+        public string? sortBy { get; set; }
+
+        [BsonElement("sortDirection")]
+        [JsonPropertyName("sortDirection")]
+        public string? sortDirection { get; set; }
+
+        [BsonElement("fromDate")]
+        [JsonPropertyName("fromDate")]
+        public DateTime? fromDate { get; set; }
+
+        [BsonElement("toDate")]
+        [JsonPropertyName("toDate")]
+        public DateTime? toDate { get; set; }
+
+        [BsonElement("recordCount")]
+        [JsonPropertyName("recordCount")]
+        public int recordCount { get; set; }
+
+        [BsonElement("exportedAt")]
+        [JsonPropertyName("exportedAt")]
+        public DateTime exportedAt { get; set; } = DateTime.UtcNow;
+
+        [BsonElement("exportedBy")]
+        [JsonPropertyName("exportedBy")]
+        public string? exportedBy { get; set; }
+
+        [BsonElement("isDeleted")]
+        [JsonPropertyName("isDeleted")]
+        public bool isDeleted { get; set; } = false;
+
+        [BsonElement("deletedAt")]
+        [JsonPropertyName("deletedAt")]
+        public DateTime? deletedAt { get; set; }
+
+        [BsonElement("deletedBy")]
+        [JsonPropertyName("deletedBy")]
+        public string? deletedBy { get; set; }
+    }
 }
