@@ -1508,6 +1508,12 @@ namespace B2BAdmin.ApiDocument.API.Controllers
         {
             ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
 
+            using var package = new ExcelPackage();
+            var worksheet = package.Workbook.Worksheets.Add("SoChiTietCongNo");
+            worksheet.View.ShowGridLines = false;
+            worksheet.Cells.Style.Font.Name = "Times New Roman";
+
+            transactions ??= new List<CustomerDebtTransaction>();
             var exportedAccountType = ResolveExportAccountTypeCode(transactions);
             var ledgerAccountCode = !string.IsNullOrWhiteSpace(exportedAccountType)
                 ? exportedAccountType
@@ -1526,12 +1532,6 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             worksheet.Column(5).Width = 15;
             worksheet.Column(6).Width = 15;
             worksheet.Column(7).Width = 26;
-
-            transactions ??= new List<CustomerDebtTransaction>();
-            var ledgerAccountCode = ResolveLedgerAccountCode(customer);
-            var ledgerTitle = ledgerAccountCode == "131"
-                ? "SỔ CHI TIẾT CÔNG NỢ PHẢI THU"
-                : "SỔ CHI TIẾT CÔNG NỢ PHẢI TRẢ";
 
             var totalDebit = transactions
                 .Where(x => string.Equals(x.transactionType, "debt", StringComparison.OrdinalIgnoreCase))
