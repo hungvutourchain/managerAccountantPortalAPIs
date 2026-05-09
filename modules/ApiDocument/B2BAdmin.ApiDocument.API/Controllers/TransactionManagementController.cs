@@ -86,6 +86,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             {
                 id = Guid.NewGuid().ToString("N"),
                 customerId = customer.Id,
+                accountType = NormalizeText(payload.accountType),
                 transactionType = transactionType,
                 amount = payload.amount,
                 transactionAt = transactionAt,
@@ -146,6 +147,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 transaction = new
                 {
                     id = transaction.id,
+                    accountType = transaction.accountType,
                     transactionType = transaction.transactionType,
                     amount = transaction.amount,
                     transactionAt = transaction.transactionAt,
@@ -267,6 +269,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             }
 
             transaction.customerId = targetCustomer.Id;
+            transaction.accountType = NormalizeText(payload.accountType);
             transaction.transactionType = transactionType;
             transaction.amount = payload.amount;
             transaction.transactionAt = nextTransactionAt;
@@ -690,6 +693,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                     {
                         id = t.id,
                         customerId = c.Id,
+                            accountType = t.accountType,
                         transactionType = t.transactionType,
                         amount = t.amount,
                         transactionAt = t.transactionAt,
@@ -721,6 +725,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                         customerId = t.customerId,
                         customerCode = customer?.code,
                         customerName = customer?.name,
+                        accountType = t.accountType,
                         transactionType = t.transactionType,
                         amount = t.amount,
                         transactionAt = t.transactionAt,
@@ -1703,6 +1708,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
         public class CreateDebtTransactionRequest
         {
             public string customerId { get; set; }
+            public string accountType { get; set; }
             public string transactionType { get; set; }
             public decimal amount { get; set; }
             public DateTime? transactionAt { get; set; }
@@ -1713,6 +1719,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
         public class UpdateDebtTransactionRequest
         {
             public string customerId { get; set; }
+            public string accountType { get; set; }
             public string transactionType { get; set; }
             public decimal amount { get; set; }
             public DateTime? transactionAt { get; set; }
@@ -1726,6 +1733,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             public string customerId { get; set; }
             public string customerCode { get; set; }
             public string customerName { get; set; }
+            public string accountType { get; set; }
             public string transactionType { get; set; }
             public decimal amount { get; set; }
             public DateTime transactionAt { get; set; }
