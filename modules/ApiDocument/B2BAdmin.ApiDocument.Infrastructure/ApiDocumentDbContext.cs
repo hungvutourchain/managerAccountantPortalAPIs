@@ -11,6 +11,7 @@ using MongoDB.Bson.Serialization.IdGenerators;
 using B2BAdmin.ApiDocument.Domains.Models.Tours;
 using B2BAdmin.ApiDocument.Domains.Models.Hotels;
 using FluentValidation.Resources;
+using MongoDB.Driver;
 
 namespace B2BAdmin.ApiDocument.Infrastructure
 {
@@ -43,6 +44,8 @@ namespace B2BAdmin.ApiDocument.Infrastructure
             BsonClassMap.RegisterClassMap<LocationLevel3>();
             BsonClassMap.RegisterClassMap<LocationLevel4>();
             BsonClassMap.RegisterClassMap<LocationFormatType>();
+
+            EnsureCustomerAccountIndexes();
         }
         public MongoDB.Driver.IMongoCollection<siteTemplates> configPages { get { return _database.GetCollection<siteTemplates>("api_document_config"); } }
         public MongoDB.Driver.IMongoCollection<DocumentMenu> DocumentMenus { get { return _database.GetCollection<DocumentMenu>("api_document_menus"); } }
@@ -83,6 +86,39 @@ namespace B2BAdmin.ApiDocument.Infrastructure
         }
        
         public MongoDB.Driver.IMongoCollection<DetailBookRetailSalesSic> BookRetailSalesSics { get { return _database.GetCollection<DetailBookRetailSalesSic>("retail_sales_sic_books"); } }
+
+        private void EnsureCustomerAccountIndexes()
+        {
+            try
+            {
+                var customerCollection = _database.GetCollection<CustomerAccount>("customer_accounts");
+
+                var listBaseIndex = Builders<CustomerAccount>.IndexKeys.Combine(
+                    Builders<CustomerAccount>.IndexKeys.Ascending(x => x.isDeleted),
+                    Builders<CustomerAccount>.IndexKeys.Ascending("isDelete"),
+                    Builders<CustomerAccount>.IndexKeys.Descending(x => x.updatedAt));
+
+                var listStatusRiskIndex = Builders<CustomerAccount>.IndexKeys.Combine(
+                    Builders<CustomerAccount>.IndexKeys.Ascending(x => x.isDeleted),
+                    Builders<CustomerAccount>.IndexKeys.Ascending("isDelete"),
+                    Builders<CustomerAccount>.IndexKeys.Ascending(x => x.status),
+                    Builders<CustomerAccount>.IndexKeys.Ascending(x => x.riskLevel),
+                    Builders<CustomerAccount>.IndexKeys.Descending(x => x.updatedAt));
+
+                customerCollection.Indexes.CreateMany(new[]
+                {
+                    new CreateIndexModel<CustomerAccount>(listBaseIndex, new CreateIndexOptions { Name = "idx_customer_list_base" }),
+                    new CreateIndexModel<CustomerAccount>(listStatusRiskIndex, new CreateIndexOptions { Name = "idx_customer_list_status_risk" }),
+                    new CreateIndexModel<CustomerAccount>(Builders<CustomerAccount>.IndexKeys.Ascending(x => x.code), new CreateIndexOptions { Name = "idx_customer_code" }),
+                    new CreateIndexModel<CustomerAccount>(Builders<CustomerAccount>.IndexKeys.Ascending(x => x.taxCode), new CreateIndexOptions { Name = "idx_customer_tax_code" }),
+                    new CreateIndexModel<CustomerAccount>(Builders<CustomerAccount>.IndexKeys.Ascending(x => x.phone), new CreateIndexOptions { Name = "idx_customer_phone" }),
+                });
+            }
+            catch
+            {
+                // Do not block application startup if index creation fails.
+            }
+        }
 
     }
 }

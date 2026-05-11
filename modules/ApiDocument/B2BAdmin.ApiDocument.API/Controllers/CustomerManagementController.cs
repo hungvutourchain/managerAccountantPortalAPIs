@@ -85,6 +85,29 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 .Sort(sortDefinition)
                 .Skip((page - 1) * pageSize)
                 .Limit(pageSize)
+                .Project(x => new CustomerAccount
+                {
+                    Id = x.Id,
+                    code = x.code,
+                    name = x.name,
+                    category = x.category,
+                    taxCode = x.taxCode,
+                    bankAccount = x.bankAccount,
+                    bankName = x.bankName,
+                    phone = x.phone,
+                    email = x.email,
+                    address = x.address,
+                    debtAmount = x.debtAmount,
+                    creditAmount = x.creditAmount,
+                    status = x.status,
+                    riskLevel = x.riskLevel,
+                    owner = x.owner,
+                    tags = x.tags,
+                    lastTransactionAt = x.lastTransactionAt,
+                    updatedAt = x.updatedAt,
+                    createdAt = x.createdAt,
+                    isDeleted = x.isDeleted,
+                })
                 .ToListAsync();
 
             return Ok(new
@@ -241,39 +264,136 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             page = page < 1 ? 1 : page;
             pageSize = pageSize < 1 ? 10 : Math.Min(pageSize, 100);
 
-            var filteredData = await GetFilteredDebtSourceAsync(search, status, riskLevel, fromDate, toDate);
+            var filterBuilder = Builders<CustomerAccount>.Filter;
+            var filters = new List<FilterDefinition<CustomerAccount>>
+            {
+                filterBuilder.Eq(x => x.isDeleted, false),
+                filterBuilder.Ne("isDelete", true),
+            };
 
-            var projected = filteredData
-                .Select(x =>
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var keyword = Regex.Escape(search.Trim());
+                filters.Add(filterBuilder.Or(
+                    filterBuilder.Regex(x => x.name, new BsonRegularExpression(keyword, "i")),
+                    filterBuilder.Regex(x => x.code, new BsonRegularExpression(keyword, "i")),
+                    filterBuilder.Regex(x => x.taxCode, new BsonRegularExpression(keyword, "i")),
+                    filterBuilder.Regex(x => x.phone, new BsonRegularExpression(keyword, "i"))
+                ));
+            }
+
+            if (!string.IsNullOrWhiteSpace(status) && !string.Equals(status, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                filters.Add(filterBuilder.Eq(x => x.status, status));
+            }
+
+            if (!string.IsNullOrWhiteSpace(riskLevel) && !string.Equals(riskLevel, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                filters.Add(filterBuilder.Eq(x => x.riskLevel, riskLevel));
+            }
+
+            var normalizedFromDate = fromDate?.Date;
+            var normalizedToDate = toDate?.Date.AddDays(1).AddTicks(-1);
+            if (normalizedFromDate.HasValue || normalizedToDate.HasValue)
+            {
+                var transactionFilterBuilder = Builders<CustomerDebtTransaction>.Filter;
+                var transactionFilters = new List<FilterDefinition<CustomerDebtTransaction>>
                 {
-                    var agingDays = GetAgingDays(x.lastTransactionAt);
-                    var netBalance = GetNetBalance(x);
+                    transactionFilterBuilder.Eq(x => x.isDeleted, false)
+                };
 
-                    return new DebtListItemDto
+                if (normalizedFromDate.HasValue)
+                {
+                    transactionFilters.Add(transactionFilterBuilder.Gte(x => x.transactionAt, normalizedFromDate.Value));
+                }
+
+                if (normalizedToDate.HasValue)
+                {
+                    transactionFilters.Add(transactionFilterBuilder.Lte(x => x.transactionAt, normalizedToDate.Value));
+                }
+
+                var matchingCustomerIds = await _apiDocumentDbContext.CustomerDebtTransactions
+                    .Distinct<string>(x => x.customerId, transactionFilterBuilder.And(transactionFilters))
+                    .ToListAsync();
+
+                var distinctCustomerIds = matchingCustomerIds
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+
+                if (distinctCustomerIds.Count == 0)
+                {
+                    return Ok(new
                     {
-                        id = x.Id,
-                        code = x.code,
-                        name = x.name,
-                        phone = x.phone,
-                        status = x.status,
-                        riskLevel = x.riskLevel,
-                        debtAmount = x.debtAmount,
-                        creditAmount = x.creditAmount,
-                        netBalance = netBalance,
-                        agingDays = agingDays,
-                        agingBucket = GetAgingBucket(agingDays),
-                        lastTransactionAt = x.lastTransactionAt,
-                        updatedAt = x.updatedAt,
-                    };
-                })
-                .ToList();
+                        page,
+                        pageSize,
+                        totalItems = 0,
+                        totalPages = 0,
+                        items = new List<DebtListItemDto>()
+                    });
+                }
 
-            var sorted = SortDebtItems(projected, sortBy, sortDirection);
-            var totalItems = sorted.Count;
-            var items = sorted
+                filters.Add(filterBuilder.In(x => x.Id, distinctCustomerIds));
+            }
+
+            var finalFilter = filterBuilder.And(filters);
+            var totalItems = await _apiDocumentDbContext.CustomerAccounts.CountDocumentsAsync(finalFilter);
+
+            if (totalItems == 0)
+            {
+                return Ok(new
+                {
+                    page,
+                    pageSize,
+                    totalItems = 0,
+                    totalPages = 0,
+                    items = new List<DebtListItemDto>()
+                });
+            }
+
+            var isDesc = string.Equals(sortDirection, "desc", StringComparison.OrdinalIgnoreCase);
+            var normalizedSortBy = (sortBy ?? string.Empty).Trim().ToLowerInvariant();
+
+            var aggregate = _apiDocumentDbContext.CustomerAccounts
+                .Aggregate()
+                .Match(finalFilter)
+                .Project(x => new DebtListItemDto
+                {
+                    id = x.Id,
+                    code = x.code,
+                    name = x.name,
+                    phone = x.phone,
+                    status = x.status,
+                    riskLevel = x.riskLevel,
+                    debtAmount = x.debtAmount,
+                    creditAmount = x.creditAmount,
+                    netBalance = x.debtAmount - x.creditAmount,
+                    agingDays = 0,
+                    agingBucket = null,
+                    lastTransactionAt = x.lastTransactionAt,
+                    updatedAt = x.updatedAt,
+                });
+
+            aggregate = normalizedSortBy switch
+            {
+                "name" => isDesc ? aggregate.SortByDescending(x => x.name) : aggregate.SortBy(x => x.name),
+                "status" => isDesc ? aggregate.SortByDescending(x => x.status) : aggregate.SortBy(x => x.status),
+                "risklevel" => isDesc ? aggregate.SortByDescending(x => x.riskLevel) : aggregate.SortBy(x => x.riskLevel),
+                "lasttransactionat" => isDesc ? aggregate.SortByDescending(x => x.lastTransactionAt) : aggregate.SortBy(x => x.lastTransactionAt),
+                "agingdays" => isDesc ? aggregate.SortBy(x => x.lastTransactionAt) : aggregate.SortByDescending(x => x.lastTransactionAt),
+                _ => isDesc ? aggregate.SortByDescending(x => x.netBalance) : aggregate.SortBy(x => x.netBalance),
+            };
+
+            var items = await aggregate
                 .Skip((page - 1) * pageSize)
-                .Take(pageSize)
-                .ToList();
+                .Limit(pageSize)
+                .ToListAsync();
+
+            foreach (var item in items)
+            {
+                item.agingDays = GetAgingDays(item.lastTransactionAt);
+                item.agingBucket = GetAgingBucket(item.agingDays);
+            }
 
             return Ok(new
             {
