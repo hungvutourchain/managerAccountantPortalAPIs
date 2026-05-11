@@ -248,11 +248,19 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             var nowMs = new BsonDateTime(DateTime.UtcNow);
 
             // Compute netBalance and agingDays on each document
+            // Note: debtAmount/creditAmount may be stored as strings in older documents;
+            //       $toDecimal converts both before arithmetic so the pipeline never fails.
             var addFieldsStage = new BsonDocument("$addFields", new BsonDocument
             {
+                { "debtAmount",   new BsonDocument("$toDecimal", "$debtAmount") },
+                { "creditAmount", new BsonDocument("$toDecimal", "$creditAmount") },
                 {
                     "netBalance", new BsonDocument("$subtract",
-                        new BsonArray { "$debtAmount", "$creditAmount" })
+                        new BsonArray
+                        {
+                            new BsonDocument("$toDecimal", "$debtAmount"),
+                            new BsonDocument("$toDecimal", "$creditAmount"),
+                        })
                 },
                 {
                     "agingDays", new BsonDocument("$cond", new BsonDocument
@@ -544,9 +552,15 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             var isDesc = string.Equals(sortDirection, "desc", StringComparison.OrdinalIgnoreCase);
             var normalizedSortBy = (sortBy ?? string.Empty).Trim().ToLowerInvariant();
 
+            // Convert string-stored money fields to Decimal128 before the typed Project.
             var aggregate = _apiDocumentDbContext.CustomerAccounts
                 .Aggregate()
                 .Match(finalFilter)
+                .AppendStage<CustomerAccount>(new BsonDocument("$addFields", new BsonDocument
+                {
+                    { "debtAmount",   new BsonDocument("$toDecimal", "$debtAmount") },
+                    { "creditAmount", new BsonDocument("$toDecimal", "$creditAmount") },
+                }))
                 .Project(x => new DebtListItemDto
                 {
                     id = x.Id,
