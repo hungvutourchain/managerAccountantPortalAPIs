@@ -1,0 +1,13 @@
+version: '3.4'
+
+services:
+
+  accountant-portal-classic:
+    image: ghcr.io/hungvutourchain/accountantportal:latest
+    networks:
+      - general
+
+networks:
+  general:
+    external:
+      name: infrastructure_default

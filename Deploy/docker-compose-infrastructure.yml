@@ -1,0 +1,45 @@
+version: '3.4'
+
+services:
+
+    nginx:
+      image: staticfloat/nginx-certbot
+      deploy:
+        placement:
+          constraints:
+            - node.role == manager
+      environment:
+              CERTBOT_EMAIL: duongngocduyit@gmail.com
+      volumes:
+        - /host/deploy/nginx/sites-enabled-template:/etc/nginx/user.conf.d:ro
+        - /host/deploy/nginx/sites-enabled:/etc/nginx/conf.d
+        - letsencrypt:/etc/letsencrypt
+      ports:
+        - "80:80"
+        - "443:443"
+      networks:
+        - default
+
+    mongodb:
+      image: mongo:latest
+      deploy:
+        placement:
+          constraints:
+            - node.role == manager
+      environment:
+        MONGO_INITDB_ROOT_USERNAME: mongoadmin
+        MONGO_INITDB_ROOT_PASSWORD: Tourch@in#179
+      ports:
+        - "27017:27017"
+      volumes:
+        - mongodb_data:/data/db
+      networks:
+        - default 
+
+networks:
+  default:
+
+volumes:
+  letsencrypt:
+  mongodb_data:
+    external: true

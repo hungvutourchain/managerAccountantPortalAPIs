@@ -9,7 +9,7 @@ env:
   IMAGE_NAME7: hungvutourchain/accountantportalapis:latest
   PAT: ${{secrets.PAT}}
   # IP: 152.42.245.213 
-  IP: 159.89.193.175
+  IP: 128.199.72.245
   SSH: ${{ secrets.SSH_PRIVATE_KEY }}
 jobs:
   publish_document_api:

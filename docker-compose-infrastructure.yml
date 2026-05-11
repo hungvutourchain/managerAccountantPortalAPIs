@@ -1,0 +1,29 @@
+version: '3.4'
+
+services:
+
+    nginx:
+      image: staticfloat/nginx-certbot
+      deploy:
+        placement:
+          constraints:
+            - node.role == manager
+      environment:
+              CERTBOT_EMAIL: kawavu@gmail.com
+      volumes:
+        - /host/deploy/nginx/sites-enabled-template:/etc/nginx/user.conf.d:ro
+        - /host/deploy/nginx/sites-enabled:/etc/nginx/conf.d
+        - letsencrypt:/etc/letsencrypt
+      ports:
+        - "80:80"
+        - "443:443"
+      networks:
+        - default
+
+networks:
+  default:
+
+volumes:
+  letsencrypt:
+  mongodb_data:
+    external: true
