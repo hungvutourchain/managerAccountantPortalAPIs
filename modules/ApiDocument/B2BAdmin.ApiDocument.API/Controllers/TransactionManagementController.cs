@@ -2087,6 +2087,43 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 }
             }
 
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                var chromiumExecutable = Path.Combine(nativePath, "chrome-linux", "chrome");
+                if (System.IO.File.Exists(chromiumExecutable))
+                {
+                    try
+                    {
+                        System.IO.File.SetUnixFileMode(
+                            chromiumExecutable,
+                            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                            | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                            | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+                    }
+                    catch
+                    {
+                        // Ignore permission failures; converter may still work with existing mode.
+                    }
+                }
+
+                var chromeSandbox = Path.Combine(nativePath, "chrome-linux", "chrome_sandbox");
+                if (System.IO.File.Exists(chromeSandbox))
+                {
+                    try
+                    {
+                        System.IO.File.SetUnixFileMode(
+                            chromeSandbox,
+                            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                            | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                            | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+                    }
+                    catch
+                    {
+                        // Ignore permission failures; converter may still work with existing mode.
+                    }
+                }
+            }
+
             return nativePath;
         }
 
@@ -2105,7 +2142,8 @@ namespace B2BAdmin.ApiDocument.API.Controllers
 
             if (runtimeId == "linux")
             {
-                return Directory.Exists(Path.Combine(nativePath, "chrome-linux"));
+                var linuxChromiumExecutable = Path.Combine(nativePath, "chrome-linux", "chrome");
+                return System.IO.File.Exists(linuxChromiumExecutable);
             }
 
             if (runtimeId == "win")
