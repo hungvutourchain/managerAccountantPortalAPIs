@@ -124,26 +124,47 @@ namespace B2BAdmin.ApiDocument.API.Controllers
         public async Task<IActionResult> GetSummaryAsync()
         {
             var filterBuilder = Builders<CustomerAccount>.Filter;
-            var filter = filterBuilder.And(
+            var baseFilter = filterBuilder.And(
                 filterBuilder.Eq(x => x.isDeleted, false),
                 filterBuilder.Ne("isDelete", true));
-            var data = await _apiDocumentDbContext.CustomerAccounts.Find(filter).ToListAsync();
 
-            var totalCustomers = data.Count;
-            var activeCustomers = data.Count(x => string.Equals(x.status, "active", StringComparison.OrdinalIgnoreCase));
-            var warningCustomers = data.Count(x => string.Equals(x.riskLevel, "warning", StringComparison.OrdinalIgnoreCase));
-            var blockedCustomers = data.Count(x => string.Equals(x.status, "blocked", StringComparison.OrdinalIgnoreCase));
-            var totalDebt = data.Sum(x => x.debtAmount);
-            var totalCredit = data.Sum(x => x.creditAmount);
+            // Run all counts in parallel instead of loading every document to RAM
+            var totalTask   = _apiDocumentDbContext.CustomerAccounts.CountDocumentsAsync(baseFilter);
+            var activeTask  = _apiDocumentDbContext.CustomerAccounts.CountDocumentsAsync(
+                filterBuilder.And(baseFilter, filterBuilder.Eq(x => x.status, "active")));
+            var warningTask = _apiDocumentDbContext.CustomerAccounts.CountDocumentsAsync(
+                filterBuilder.And(baseFilter, filterBuilder.Eq(x => x.riskLevel, "warning")));
+            var blockedTask = _apiDocumentDbContext.CustomerAccounts.CountDocumentsAsync(
+                filterBuilder.And(baseFilter, filterBuilder.Eq(x => x.status, "blocked")));
+
+            var sumsTask = _apiDocumentDbContext.CustomerAccounts
+                .Aggregate()
+                .Match(baseFilter)
+                .AppendStage<BsonDocument>(new BsonDocument("$group", new BsonDocument
+                {
+                    { "_id", BsonNull.Value },
+                    { "totalDebt",   new BsonDocument("$sum", "$debtAmount") },
+                    { "totalCredit", new BsonDocument("$sum", "$creditAmount") },
+                }))
+                .FirstOrDefaultAsync();
+
+            await Task.WhenAll(totalTask, activeTask, warningTask, blockedTask, sumsTask);
+
+            var sums = sumsTask.Result;
+            decimal ParseBsonDecimal(BsonDocument doc, string field)
+            {
+                if (doc == null || !doc.TryGetValue(field, out var v) || v.IsBsonNull) return 0m;
+                return v.BsonType == BsonType.Decimal128 ? (decimal)v.AsDecimal128 : Convert.ToDecimal(v.ToDouble());
+            }
 
             return Ok(new
             {
-                totalCustomers,
-                activeCustomers,
-                warningCustomers,
-                blockedCustomers,
-                totalDebt,
-                totalCredit
+                totalCustomers = totalTask.Result,
+                activeCustomers = activeTask.Result,
+                warningCustomers = warningTask.Result,
+                blockedCustomers = blockedTask.Result,
+                totalDebt  = ParseBsonDecimal(sums, "totalDebt"),
+                totalCredit = ParseBsonDecimal(sums, "totalCredit"),
             });
         }
 
@@ -154,98 +175,267 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             [FromQuery] DateTime? fromDate = null,
             [FromQuery] DateTime? toDate = null)
         {
-            var filteredDebtSource = await GetFilteredDebtSourceAsync(null, status, riskLevel, fromDate, toDate);
+            // ---- Build filter (mirrors customer-debt-details pattern) ----
+            var filterBuilder = Builders<CustomerAccount>.Filter;
+            var filters = new List<FilterDefinition<CustomerAccount>>
+            {
+                filterBuilder.Eq(x => x.isDeleted, false),
+                filterBuilder.Ne("isDelete", true),
+            };
 
-            var totalCustomers = filteredDebtSource.Count;
-            var activeCustomers = filteredDebtSource.Count(x => string.Equals(x.status, "active", StringComparison.OrdinalIgnoreCase));
-            var warningCustomers = filteredDebtSource.Count(x => string.Equals(x.riskLevel, "warning", StringComparison.OrdinalIgnoreCase));
-            var blockedCustomers = filteredDebtSource.Count(x => string.Equals(x.status, "blocked", StringComparison.OrdinalIgnoreCase));
-            var totalDebt = filteredDebtSource.Sum(x => x.debtAmount);
-            var totalCredit = filteredDebtSource.Sum(x => x.creditAmount);
+            if (!string.IsNullOrWhiteSpace(status) && !string.Equals(status, "all", StringComparison.OrdinalIgnoreCase))
+                filters.Add(filterBuilder.Eq(x => x.status, status));
 
-            var positiveBalances = filteredDebtSource
-                .Select(GetNetBalance)
-                .Where(x => x > 0)
-                .ToList();
+            if (!string.IsNullOrWhiteSpace(riskLevel) && !string.Equals(riskLevel, "all", StringComparison.OrdinalIgnoreCase))
+                filters.Add(filterBuilder.Eq(x => x.riskLevel, riskLevel));
 
-            var negativeBalances = filteredDebtSource
-                .Select(GetNetBalance)
-                .Where(x => x < 0)
-                .Select(Math.Abs)
-                .ToList();
+            var normalizedFromDate = fromDate?.Date;
+            var normalizedToDate = toDate?.Date.AddDays(1).AddTicks(-1);
 
-            var totalReceivable = positiveBalances.Sum();
-            var totalPayable = negativeBalances.Sum();
-            var netExposure = totalReceivable - totalPayable;
-
-            var highRiskExposure = filteredDebtSource
-                .Where(x => string.Equals(x.riskLevel, "warning", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(x.riskLevel, "critical", StringComparison.OrdinalIgnoreCase))
-                .Select(GetNetBalance)
-                .Where(x => x > 0)
-                .Sum();
-
-            var agingBuckets = filteredDebtSource
-                .Where(x => GetNetBalance(x) > 0)
-                .Select(x => new { net = GetNetBalance(x), agingBucket = GetAgingBucket(GetAgingDays(x.lastTransactionAt)) })
-                .GroupBy(x => x.agingBucket)
-                .Select(x => new
+            if (normalizedFromDate.HasValue || normalizedToDate.HasValue)
+            {
+                var txFilterBuilder = Builders<CustomerDebtTransaction>.Filter;
+                var txFilters = new List<FilterDefinition<CustomerDebtTransaction>>
                 {
-                    bucket = x.Key,
-                    amount = x.Sum(y => y.net),
-                    customers = x.Count()
-                })
-                .ToList();
+                    txFilterBuilder.Eq(x => x.isDeleted, false),
+                };
+                if (normalizedFromDate.HasValue)
+                    txFilters.Add(txFilterBuilder.Gte(x => x.transactionAt, normalizedFromDate.Value));
+                if (normalizedToDate.HasValue)
+                    txFilters.Add(txFilterBuilder.Lte(x => x.transactionAt, normalizedToDate.Value));
 
-            var topDebtors = filteredDebtSource
-                .Select(x => new
+                var matchingIds = await _apiDocumentDbContext.CustomerDebtTransactions
+                    .Distinct<string>("customerId", txFilterBuilder.And(txFilters))
+                    .ToListAsync();
+
+                var distinctIds = matchingIds
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+
+                if (distinctIds.Count == 0)
                 {
-                    id = x.Id,
-                    code = x.code,
-                    name = x.name,
-                    status = x.status,
-                    riskLevel = x.riskLevel,
-                    agingDays = GetAgingDays(x.lastTransactionAt),
-                    lastTransactionAt = x.lastTransactionAt,
-                    netBalance = GetNetBalance(x)
-                })
-                .Where(x => x.netBalance > 0)
-                .OrderByDescending(x => x.netBalance)
-                .ThenByDescending(x => x.agingDays)
-                .Take(5)
-                .ToList();
+                    return Ok(new
+                    {
+                        generatedAt = DateTime.UtcNow,
+                        filters = new
+                        {
+                            status = string.IsNullOrWhiteSpace(status) ? "all" : status.Trim(),
+                            riskLevel = string.IsNullOrWhiteSpace(riskLevel) ? "all" : riskLevel.Trim(),
+                            fromDate = fromDate?.Date.ToString("yyyy-MM-dd"),
+                            toDate = toDate?.Date.ToString("yyyy-MM-dd"),
+                        },
+                        customerSummary = new
+                        {
+                            totalCustomers = 0, activeCustomers = 0, warningCustomers = 0,
+                            blockedCustomers = 0, totalDebt = 0m, totalCredit = 0m,
+                        },
+                        debtOverview = new
+                        {
+                            totalReceivable = 0m, totalPayable = 0m, netExposure = 0m,
+                            highRiskExposure = 0m, customerCount = 0, debtorCount = 0, creditorCount = 0,
+                            agingBuckets = Array.Empty<object>(), topDebtors = Array.Empty<object>(),
+                        },
+                    });
+                }
+
+                filters.Add(filterBuilder.In(x => x.Id, distinctIds));
+            }
+
+            var finalFilter = filterBuilder.And(filters);
+
+            // ---- MongoDB aggregation: $addFields → $facet (single server-side pass) ----
+            var nowMs = new BsonDateTime(DateTime.UtcNow);
+
+            // Compute netBalance and agingDays on each document
+            var addFieldsStage = new BsonDocument("$addFields", new BsonDocument
+            {
+                {
+                    "netBalance", new BsonDocument("$subtract",
+                        new BsonArray { "$debtAmount", "$creditAmount" })
+                },
+                {
+                    "agingDays", new BsonDocument("$cond", new BsonDocument
+                    {
+                        { "if",   new BsonDocument("$not", new BsonArray { "$lastTransactionAt" }) },
+                        { "then", 999 },
+                        { "else", new BsonDocument("$toInt",
+                            new BsonDocument("$divide", new BsonArray
+                            {
+                                new BsonDocument("$subtract", new BsonArray { nowMs, "$lastTransactionAt" }),
+                                86400000.0
+                            })) },
+                    })
+                },
+            });
+
+            // Aging bucket expression: matches C# GetAgingBucket()
+            var agingBucketExpr = new BsonDocument("$switch", new BsonDocument
+            {
+                {
+                    "branches", new BsonArray
+                    {
+                        new BsonDocument { { "case", new BsonDocument("$lte", new BsonArray { "$agingDays", 30  }) }, { "then", "0-30"  } },
+                        new BsonDocument { { "case", new BsonDocument("$lte", new BsonArray { "$agingDays", 60  }) }, { "then", "31-60" } },
+                        new BsonDocument { { "case", new BsonDocument("$lte", new BsonArray { "$agingDays", 90  }) }, { "then", "61-90" } },
+                    }
+                },
+                { "default", ">90" },
+            });
+
+            var facetStage = new BsonDocument("$facet", new BsonDocument
+            {
+                {
+                    "overview", new BsonArray
+                    {
+                        new BsonDocument("$group", new BsonDocument
+                        {
+                            { "_id", BsonNull.Value },
+                            { "totalCustomers",  new BsonDocument("$sum", 1) },
+                            { "activeCustomers",  new BsonDocument("$sum", new BsonDocument("$cond", new BsonArray { new BsonDocument("$eq",  new BsonArray { "$status",    "active"   }), 1, 0 })) },
+                            { "warningCustomers", new BsonDocument("$sum", new BsonDocument("$cond", new BsonArray { new BsonDocument("$eq",  new BsonArray { "$riskLevel", "warning"  }), 1, 0 })) },
+                            { "blockedCustomers", new BsonDocument("$sum", new BsonDocument("$cond", new BsonArray { new BsonDocument("$eq",  new BsonArray { "$status",    "blocked"  }), 1, 0 })) },
+                            { "totalDebt",        new BsonDocument("$sum", "$debtAmount") },
+                            { "totalCredit",      new BsonDocument("$sum", "$creditAmount") },
+                            { "totalReceivable",  new BsonDocument("$sum", new BsonDocument("$cond", new BsonArray { new BsonDocument("$gt", new BsonArray { "$netBalance", 0 }), "$netBalance", 0 })) },
+                            { "totalPayable",     new BsonDocument("$sum", new BsonDocument("$cond", new BsonArray { new BsonDocument("$lt", new BsonArray { "$netBalance", 0 }), new BsonDocument("$abs", "$netBalance"), 0 })) },
+                            {
+                                "highRiskExposure", new BsonDocument("$sum",
+                                    new BsonDocument("$cond", new BsonArray
+                                    {
+                                        new BsonDocument("$and", new BsonArray
+                                        {
+                                            new BsonDocument("$gt", new BsonArray { "$netBalance", 0 }),
+                                            new BsonDocument("$in", new BsonArray { "$riskLevel", new BsonArray { "warning", "critical" } }),
+                                        }),
+                                        "$netBalance",
+                                        0,
+                                    }))
+                            },
+                            { "debtorCount",   new BsonDocument("$sum", new BsonDocument("$cond", new BsonArray { new BsonDocument("$gt", new BsonArray { "$netBalance", 0 }), 1, 0 })) },
+                            { "creditorCount", new BsonDocument("$sum", new BsonDocument("$cond", new BsonArray { new BsonDocument("$lt", new BsonArray { "$netBalance", 0 }), 1, 0 })) },
+                        }),
+                    }
+                },
+                {
+                    "agingBuckets", new BsonArray
+                    {
+                        new BsonDocument("$match",     new BsonDocument("netBalance", new BsonDocument("$gt", 0))),
+                        new BsonDocument("$addFields", new BsonDocument("agingBucket", agingBucketExpr)),
+                        new BsonDocument("$group",     new BsonDocument
+                        {
+                            { "_id",       "$agingBucket" },
+                            { "amount",    new BsonDocument("$sum", "$netBalance") },
+                            { "customers", new BsonDocument("$sum", 1) },
+                        }),
+                        new BsonDocument("$project", new BsonDocument
+                        {
+                            { "_id", 0 }, { "bucket", "$_id" }, { "amount", 1 }, { "customers", 1 },
+                        }),
+                    }
+                },
+                {
+                    "topDebtors", new BsonArray
+                    {
+                        new BsonDocument("$match",   new BsonDocument("netBalance", new BsonDocument("$gt", 0))),
+                        new BsonDocument("$sort",    new BsonDocument { { "netBalance", -1 }, { "agingDays", -1 } }),
+                        new BsonDocument("$limit",   5),
+                        new BsonDocument("$project", new BsonDocument
+                        {
+                            { "id", "$_id" }, { "_id", 0 },
+                            { "code", 1 }, { "name", 1 }, { "status", 1 }, { "riskLevel", 1 },
+                            { "agingDays", 1 }, { "lastTransactionAt", 1 }, { "netBalance", 1 },
+                        }),
+                    }
+                },
+            });
+
+            var aggResult = await _apiDocumentDbContext.CustomerAccounts
+                .Aggregate()
+                .Match(finalFilter)
+                .AppendStage<BsonDocument>(addFieldsStage)
+                .AppendStage<BsonDocument>(facetStage)
+                .FirstOrDefaultAsync();
+
+            // ---- Parse BsonDocument result ----
+            static int GetInt(BsonDocument doc, string field)
+            {
+                if (doc == null || !doc.TryGetValue(field, out var v) || v.IsBsonNull) return 0;
+                return v.ToInt32();
+            }
+            static decimal GetDecimal(BsonDocument doc, string field)
+            {
+                if (doc == null || !doc.TryGetValue(field, out var v) || v.IsBsonNull) return 0m;
+                return v.BsonType == BsonType.Decimal128 ? (decimal)v.AsDecimal128 : Convert.ToDecimal(v.ToDouble());
+            }
+
+            var overviewArr = aggResult?["overview"]?.AsBsonArray;
+            var ov = overviewArr?.Count > 0 ? overviewArr[0].AsBsonDocument : null;
+
+            var totalCustomers  = GetInt(ov, "totalCustomers");
+            var activeCustomers = GetInt(ov, "activeCustomers");
+            var warningCustomers = GetInt(ov, "warningCustomers");
+            var blockedCustomers = GetInt(ov, "blockedCustomers");
+            var totalDebt        = GetDecimal(ov, "totalDebt");
+            var totalCredit      = GetDecimal(ov, "totalCredit");
+            var totalReceivable  = GetDecimal(ov, "totalReceivable");
+            var totalPayable     = GetDecimal(ov, "totalPayable");
+            var highRiskExposure = GetDecimal(ov, "highRiskExposure");
+            var debtorCount      = GetInt(ov, "debtorCount");
+            var creditorCount    = GetInt(ov, "creditorCount");
+            var netExposure      = totalReceivable - totalPayable;
+
+            var agingBucketsArr = aggResult?["agingBuckets"]?.AsBsonArray ?? new BsonArray();
+            var agingBuckets = agingBucketsArr.Select(b =>
+            {
+                var bd = b.AsBsonDocument;
+                return (object)new
+                {
+                    bucket    = bd.GetValue("bucket", BsonNull.Value).IsBsonNull ? null : bd["bucket"].AsString,
+                    amount    = GetDecimal(bd, "amount"),
+                    customers = GetInt(bd, "customers"),
+                };
+            }).ToList();
+
+            var topDebtorsArr = aggResult?["topDebtors"]?.AsBsonArray ?? new BsonArray();
+            var topDebtors = topDebtorsArr.Select(b =>
+            {
+                var bd = b.AsBsonDocument;
+                return (object)new
+                {
+                    id        = bd.GetValue("id",        BsonNull.Value).IsBsonNull ? null : bd["id"].AsString,
+                    code      = bd.GetValue("code",      BsonNull.Value).IsBsonNull ? null : bd["code"].AsString,
+                    name      = bd.GetValue("name",      BsonNull.Value).IsBsonNull ? null : bd["name"].AsString,
+                    status    = bd.GetValue("status",    BsonNull.Value).IsBsonNull ? null : bd["status"].AsString,
+                    riskLevel = bd.GetValue("riskLevel", BsonNull.Value).IsBsonNull ? null : bd["riskLevel"].AsString,
+                    agingDays = GetInt(bd, "agingDays"),
+                    lastTransactionAt = bd.TryGetValue("lastTransactionAt", out var lat) && !lat.IsBsonNull
+                        ? (DateTime?)lat.ToUniversalTime() : null,
+                    netBalance = GetDecimal(bd, "netBalance"),
+                };
+            }).ToList();
 
             return Ok(new
             {
                 generatedAt = DateTime.UtcNow,
                 filters = new
                 {
-                    status = string.IsNullOrWhiteSpace(status) ? "all" : status.Trim(),
+                    status    = string.IsNullOrWhiteSpace(status)    ? "all" : status.Trim(),
                     riskLevel = string.IsNullOrWhiteSpace(riskLevel) ? "all" : riskLevel.Trim(),
-                    fromDate = fromDate?.Date.ToString("yyyy-MM-dd"),
-                    toDate = toDate?.Date.ToString("yyyy-MM-dd"),
+                    fromDate  = fromDate?.Date.ToString("yyyy-MM-dd"),
+                    toDate    = toDate?.Date.ToString("yyyy-MM-dd"),
                 },
                 customerSummary = new
                 {
-                    totalCustomers,
-                    activeCustomers,
-                    warningCustomers,
-                    blockedCustomers,
-                    totalDebt,
-                    totalCredit,
+                    totalCustomers, activeCustomers, warningCustomers, blockedCustomers,
+                    totalDebt, totalCredit,
                 },
                 debtOverview = new
                 {
-                    totalReceivable,
-                    totalPayable,
-                    netExposure,
-                    highRiskExposure,
-                    customerCount = filteredDebtSource.Count,
-                    debtorCount = filteredDebtSource.Count(x => GetNetBalance(x) > 0),
-                    creditorCount = filteredDebtSource.Count(x => GetNetBalance(x) < 0),
-                    agingBuckets,
-                    topDebtors,
-                }
+                    totalReceivable, totalPayable, netExposure, highRiskExposure,
+                    customerCount = totalCustomers, debtorCount, creditorCount,
+                    agingBuckets, topDebtors,
+                },
             });
         }
 
