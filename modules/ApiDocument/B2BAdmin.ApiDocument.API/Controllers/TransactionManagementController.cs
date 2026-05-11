@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -19,6 +20,8 @@ using MongoDB.Bson;
 using MongoDB.Driver;
 using OfficeOpenXml;
 using OfficeOpenXml.Style;
+using Syncfusion.HtmlConverter;
+using Syncfusion.Pdf;
 
 namespace B2BAdmin.ApiDocument.API.Controllers
 {
@@ -874,6 +877,59 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 fileName);
         }
 
+        [HttpGet("customers/{customerId}/export-pdf")]
+        public async Task<IActionResult> ExportDebtCustomerPdfAsync(
+            string customerId,
+            [FromQuery] string transactionIds = null)
+        {
+            if (string.IsNullOrWhiteSpace(customerId))
+            {
+                return BadRequest("Invalid customerId");
+            }
+
+            var filter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, customerId);
+            var customer = await _apiDocumentDbContext.CustomerAccounts.Find(filter).FirstOrDefaultAsync();
+            if (customer == null || customer.isDeleted)
+            {
+                return NotFound("Customer not found");
+            }
+
+            await MigrateLegacyDataForCustomerAsync(customer, true);
+
+            List<CustomerDebtTransaction> transactions;
+            var requestedIds = (transactionIds ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (requestedIds.Count > 0)
+            {
+                var allTransactions = await _apiDocumentDbContext.CustomerDebtTransactions
+                    .Find(x => x.customerId == customerId)
+                    .SortBy(x => x.transactionAt)
+                    .ToListAsync();
+                transactions = allTransactions
+                    .Where(t => requestedIds.Contains(t.id ?? string.Empty))
+                    .ToList();
+            }
+            else
+            {
+                transactions = await _apiDocumentDbContext.CustomerDebtTransactions
+                    .Find(x => x.customerId == customerId)
+                    .SortBy(x => x.transactionAt)
+                    .ToListAsync();
+            }
+
+            var fileBytes = await BuildDebtCustomerPdfFileAsync(customer, transactions);
+            var safeCode = string.IsNullOrWhiteSpace(customer.code)
+                ? "khach-hang"
+                : string.Join("-", customer.code.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
+            var exportNow = ConvertToDisplayTime(DateTime.UtcNow);
+            var fileName = $"so-chi-tiet-cong-no-{safeCode}-{exportNow:yyyyMMddHHmmss}.pdf";
+
+            return File(fileBytes, "application/pdf", fileName);
+        }
+
         [HttpGet("customers/{customerId}/export-excel-history")]
         public async Task<IActionResult> GetDebtCustomerExcelExportHistoryAsync(
             string customerId,
@@ -1709,6 +1765,209 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             worksheet.Cells[signNoteRow, 5].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
 
             return package.GetAsByteArray();
+        }
+
+        private async Task<byte[]> BuildDebtCustomerPdfFileAsync(CustomerAccount customer, List<CustomerDebtTransaction> transactions)
+        {
+            var exportedAccountType = ResolveExportAccountTypeCode(transactions);
+            var ledgerAccountCode = !string.IsNullOrWhiteSpace(exportedAccountType)
+                ? exportedAccountType
+                : ResolveLedgerAccountCode(customer);
+            var ledgerTitle = ledgerAccountCode == "131"
+                ? "SỔ CHI TIẾT CÔNG NỢ PHẢI THU"
+                : ledgerAccountCode == "331"
+                    ? "SỔ CHI TIẾT CÔNG NỢ PHẢI TRẢ"
+                    : $"SỔ CHI TIẾT CÔNG NỢ TK {ledgerAccountCode}";
+
+            var balanceSideLookup = await LoadAccountTypeBalanceSideLookupAsync(transactions);
+            var totalDebit = transactions
+                .Where(x => string.Equals(GetEffectiveTransactionType(x, balanceSideLookup), "debt", StringComparison.OrdinalIgnoreCase))
+                .Sum(x => x.amount);
+            var totalCredit = transactions
+                .Where(x => string.Equals(GetEffectiveTransactionType(x, balanceSideLookup), "credit", StringComparison.OrdinalIgnoreCase))
+                .Sum(x => x.amount);
+            var closingBalance = totalDebit - totalCredit;
+
+            var html = BuildDebtCustomerPdfHtml(
+                customer,
+                transactions,
+                balanceSideLookup,
+                ledgerTitle,
+                ledgerAccountCode,
+                BuildPeriodRangeText(transactions),
+                totalDebit,
+                totalCredit,
+                closingBalance);
+
+            var htmlConverter = new HtmlToPdfConverter(HtmlRenderingEngine.Blink);
+            var settings = new BlinkConverterSettings
+            {
+                Orientation = PdfPageOrientation.Landscape,
+                PdfPageSize = PdfPageSize.A4
+            };
+            settings.Margin.All = 18;
+            htmlConverter.ConverterSettings = settings;
+
+            using (var document = htmlConverter.Convert(html, string.Empty))
+            using (var stream = new MemoryStream())
+            {
+                document.Save(stream);
+                return stream.ToArray();
+            }
+        }
+
+        private string BuildDebtCustomerPdfHtml(
+            CustomerAccount customer,
+            List<CustomerDebtTransaction> transactions,
+            IReadOnlyDictionary<string, string> balanceSideLookup,
+            string ledgerTitle,
+            string ledgerAccountCode,
+            string periodText,
+            decimal totalDebit,
+            decimal totalCredit,
+            decimal closingBalance)
+        {
+            string Encode(string value) => WebUtility.HtmlEncode(value ?? string.Empty);
+            string FormatAmount(decimal value) => value.ToString("N0", CultureInfo.GetCultureInfo("vi-VN"));
+
+            var builder = new StringBuilder();
+            builder.AppendLine("<!doctype html>");
+            builder.AppendLine("<html>");
+            builder.AppendLine("<head>");
+            builder.AppendLine("<meta charset='utf-8' />");
+            builder.AppendLine("<style>");
+            builder.AppendLine("html, body { margin: 0; padding: 0; }");
+            builder.AppendLine("body { font-family: 'Times New Roman', serif; color: #222; padding: 18px; background: #fff; }");
+            builder.AppendLine(".ledger-meta { font-size: 15px; line-height: 1.7; margin-bottom: 8px; }");
+            builder.AppendLine(".ledger-meta p { margin: 0 0 4px 0; }");
+            builder.AppendLine(".ledger-title { text-align: center; color: #c00000; font-size: 28px; font-weight: 700; margin: 16px 0 4px; letter-spacing: 0.2px; }");
+            builder.AppendLine(".ledger-period { text-align: center; font-size: 15px; margin: 0 0 10px; }");
+            builder.AppendLine(".ledger-company-box { width: 410px; margin: 0 auto 14px; border: 1px solid #888; text-align: center; padding: 4px 10px 3px; }");
+            builder.AppendLine(".company-name { font-size: 15px; font-weight: 700; text-transform: uppercase; }");
+            builder.AppendLine(".ledger-company-code { font-size: 14px; font-style: italic; margin-top: 2px; }");
+            builder.AppendLine("table { width: 100%; border-collapse: collapse; table-layout: fixed; }");
+            builder.AppendLine("th, td { border: 1px solid #8f8f8f; padding: 5px 6px; vertical-align: middle; }");
+            builder.AppendLine("thead th { font-weight: 700; text-align: center; }");
+            builder.AppendLine(".header-top th { background: #fff; font-size: 14px; }");
+            builder.AppendLine(".header-sub th, .header-index th { background: #fff; font-size: 13px; }");
+            builder.AppendLine(".row-number, .row-date, .row-account, .row-amount { text-align: center; }");
+            builder.AppendLine(".description { word-break: break-word; white-space: normal; font-weight: 700; }");
+            builder.AppendLine(".amount { text-align: right; color: #111; }");
+            builder.AppendLine(".opening td, .totals td, .closing td { font-weight: 700; }");
+            builder.AppendLine(".opening .label, .totals .label, .closing .label { text-align: center; }");
+            builder.AppendLine(".placeholder td { height: 22px; }");
+            builder.AppendLine(".muted { color: #666; }");
+            builder.AppendLine("</style>");
+            builder.AppendLine("</head>");
+            builder.AppendLine("<body>");
+            builder.AppendLine("<div class='ledger-meta'>");
+            builder.AppendLine($"<p><strong>Tên đơn vị:</strong> {Encode(customer?.name ?? "-")}</p>");
+            builder.AppendLine($"<p><strong>Số điện thoại:</strong> {Encode(customer?.phone ?? "-")}</p>");
+            builder.AppendLine($"<p><strong>Mã khách hàng:</strong> {Encode(customer?.code ?? "-")}</p>");
+            builder.AppendLine("</div>");
+            builder.AppendLine($"<div class='ledger-title'>{Encode(ledgerTitle)}</div>");
+            builder.AppendLine($"<div class='ledger-period'>{Encode(periodText)}</div>");
+            builder.AppendLine("<div class='ledger-company-box'>");
+            builder.AppendLine($"<div class='company-name'>{Encode(customer?.name ?? "-")}</div>");
+            builder.AppendLine($"<div class='ledger-company-code'>{Encode(customer?.code ?? "-")}</div>");
+            builder.AppendLine("</div>");
+            builder.AppendLine("<table class='ledger-table'>");
+            builder.AppendLine("<colgroup>");
+            builder.AppendLine("<col style='width: 7%;' />");
+            builder.AppendLine("<col style='width: 9%;' />");
+            builder.AppendLine("<col style='width: 39%;' />");
+            builder.AppendLine("<col style='width: 10%;' />");
+            builder.AppendLine("<col style='width: 10%;' />");
+            builder.AppendLine("<col style='width: 10%;' />");
+            builder.AppendLine("<col style='width: 15%;' />");
+            builder.AppendLine("</colgroup>");
+            builder.AppendLine("<thead>");
+            builder.AppendLine("<tr class='header-top'>");
+            builder.AppendLine("<th colspan='2'>Chứng từ</th>");
+            builder.AppendLine("<th rowspan='2'>DIỄN GIẢI</th>");
+            builder.AppendLine("<th rowspan='2'>Số hiệu TK</th>");
+            builder.AppendLine("<th colspan='2'>Số tiền</th>");
+            builder.AppendLine("<th rowspan='2'>Ghi chú</th>");
+            builder.AppendLine("</tr>");
+            builder.AppendLine("<tr class='header-sub'>");
+            builder.AppendLine("<th>Số hiệu</th>");
+            builder.AppendLine("<th>Ngày tháng</th>");
+            builder.AppendLine("<th>Nợ</th>");
+            builder.AppendLine("<th>Có</th>");
+            builder.AppendLine("</tr>");
+            builder.AppendLine("<tr class='header-index'>");
+            builder.AppendLine("<th>B</th>");
+            builder.AppendLine("<th>C</th>");
+            builder.AppendLine("<th>D</th>");
+            builder.AppendLine("<th>H</th>");
+            builder.AppendLine("<th>1</th>");
+            builder.AppendLine("<th>2</th>");
+            builder.AppendLine("<th>3</th>");
+            builder.AppendLine("</tr>");
+            builder.AppendLine("</thead>");
+            builder.AppendLine("<tbody>");
+            builder.AppendLine("<tr class='opening'>");
+            builder.AppendLine("<td class='label' colspan='4'>Số dư đầu tháng</td>");
+            builder.AppendLine("<td class='amount muted'>-</td>");
+            builder.AppendLine("<td class='amount muted'>-</td>");
+            builder.AppendLine("<td></td>");
+            builder.AppendLine("</tr>");
+
+            var serial = 0;
+            foreach (var transaction in transactions ?? new List<CustomerDebtTransaction>())
+            {
+                serial++;
+                var effectiveTransactionType = GetEffectiveTransactionType(transaction, balanceSideLookup);
+                var displayTransactionAt = ConvertToDisplayTime(transaction.transactionAt).ToString("d/M/yy", CultureInfo.InvariantCulture);
+                var description = string.IsNullOrWhiteSpace(transaction.note)
+                    ? BuildLedgerDescription(effectiveTransactionType, ledgerAccountCode)
+                    : transaction.note;
+                var debit = string.Equals(effectiveTransactionType, "debt", StringComparison.OrdinalIgnoreCase)
+                    ? FormatAmount(transaction.amount)
+                    : string.Empty;
+                var credit = string.Equals(effectiveTransactionType, "credit", StringComparison.OrdinalIgnoreCase)
+                    ? FormatAmount(transaction.amount)
+                    : string.Empty;
+
+                builder.AppendLine("<tr>");
+                builder.AppendLine($"<td class='row-number'>{serial}</td>");
+                builder.AppendLine($"<td class='row-date'>{Encode(displayTransactionAt)}</td>");
+                builder.AppendLine($"<td class='description'>{Encode(description)}</td>");
+                builder.AppendLine($"<td class='row-account'>{Encode(string.IsNullOrWhiteSpace(transaction.accountType) ? ledgerAccountCode : transaction.accountType)}</td>");
+                builder.AppendLine($"<td class='amount'>{Encode(debit)}</td>");
+                builder.AppendLine($"<td class='amount'>{Encode(credit)}</td>");
+                builder.AppendLine($"<td>{Encode(transaction.note ?? string.Empty)}</td>");
+                builder.AppendLine("</tr>");
+            }
+
+            var minimumLedgerRows = 8;
+            while (serial < minimumLedgerRows)
+            {
+                serial++;
+                builder.AppendLine("<tr class='placeholder'>");
+                builder.AppendLine("<td></td><td></td><td></td><td></td><td></td><td></td><td></td>");
+                builder.AppendLine("</tr>");
+            }
+
+            builder.AppendLine("<tr class='totals'>");
+            builder.AppendLine("<td class='label' colspan='4'>Tổng số phát sinh</td>");
+            builder.AppendLine($"<td class='amount'>{Encode(FormatAmount(totalDebit))}</td>");
+            builder.AppendLine($"<td class='amount'>{Encode(FormatAmount(totalCredit))}</td>");
+            builder.AppendLine("<td></td>");
+            builder.AppendLine("</tr>");
+
+            builder.AppendLine("<tr class='closing'>");
+            builder.AppendLine("<td class='label' colspan='4'>Số dư cuối tháng</td>");
+            builder.AppendLine($"<td class='amount'>{Encode(FormatAmount(closingBalance >= 0 ? closingBalance : 0))}</td>");
+            builder.AppendLine($"<td class='amount'>{Encode(FormatAmount(closingBalance < 0 ? Math.Abs(closingBalance) : 0))}</td>");
+            builder.AppendLine("<td></td>");
+            builder.AppendLine("</tr>");
+
+            builder.AppendLine("</tbody>");
+            builder.AppendLine("</table>");
+            builder.AppendLine("</body>");
+            builder.AppendLine("</html>");
+            return builder.ToString();
         }
 
         private string ResolveExportAccountTypeCode(IEnumerable<CustomerDebtTransaction> transactions)
