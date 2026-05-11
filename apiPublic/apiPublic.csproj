@@ -14,6 +14,12 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="3.1.25" />
     <PackageReference Include="Spire.PDF" Version="9.4.0" />
   </ItemGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <PackageReference Include="Syncfusion.HtmlToPdfConverter.Net.Linux" Version="33.2.5" />
+  </ItemGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <PackageReference Include="Syncfusion.HtmlToPdfConverter.Net.Mac" Version="33.2.5" />
+  </ItemGroup>
   <ItemGroup>
     <Folder Include="wwwroot\" />
     <Folder Include="AppData\Log\" />

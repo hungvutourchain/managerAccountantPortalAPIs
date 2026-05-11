@@ -1,10 +1,13 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -29,6 +32,9 @@ namespace B2BAdmin.ApiDocument.API.Controllers
     [Route("api/[controller]")]
     public class TransactionManagementController : ControllerBase
     {
+        private static readonly object BlinkRuntimeLock = new object();
+        private static readonly ConcurrentDictionary<string, DebtExportProgressState> DebtExportProgressMap = new ConcurrentDictionary<string, DebtExportProgressState>(StringComparer.OrdinalIgnoreCase);
+        private static readonly TimeSpan DebtExportProgressTtl = TimeSpan.FromMinutes(15);
         private readonly ApiDocumentDbContext _apiDocumentDbContext;
         private readonly IDebtAiService _debtAiService;
         private readonly IHostingEnvironment _webHostEnvironment;
@@ -817,117 +823,242 @@ namespace B2BAdmin.ApiDocument.API.Controllers
         }
 
         [HttpGet("customers/{customerId}/export-excel")]
-        public async Task<IActionResult> ExportDebtCustomerExcelAsync(string customerId)
+        public async Task<IActionResult> ExportDebtCustomerExcelAsync(
+            string customerId,
+            [FromQuery] string transactionIds = null,
+            [FromQuery] string exportRequestId = null)
         {
             if (string.IsNullOrWhiteSpace(customerId))
             {
                 return BadRequest("Invalid customerId");
             }
 
+            var progressRequestId = EnsureExportRequestId(exportRequestId);
+            MarkDebtExportProgress(progressRequestId, customerId, "excel", 5, "processing", "Preparing export data");
+
             var filter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, customerId);
             var customer = await _apiDocumentDbContext.CustomerAccounts.Find(filter).FirstOrDefaultAsync();
             if (customer == null || customer.isDeleted)
             {
+                MarkDebtExportProgress(progressRequestId, customerId, "excel", 100, "failed", "Customer not found");
                 return NotFound("Customer not found");
             }
 
-            await MigrateLegacyDataForCustomerAsync(customer, true);
-
-            var transactions = await _apiDocumentDbContext.CustomerDebtTransactions
-                .Find(x => x.customerId == customerId && !x.isDeleted)
-                .SortBy(x => x.transactionAt)
-                .ToListAsync();
-
-            var fileBytes = await BuildDebtCustomerExcelFileAsync(customer, transactions);
-            var safeCode = string.IsNullOrWhiteSpace(customer.code)
-                ? "khach-hang"
-                : string.Join("-", customer.code.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
-            var exportNow = ConvertToDisplayTime(DateTime.UtcNow);
-            var fileName = $"so-chi-tiet-cong-no-{safeCode}-{exportNow:yyyyMMddHHmmss}.xlsx";
-            var actor = GetCurrentActor();
-            var exportedAt = DateTime.UtcNow;
-            var exportHistoryId = Guid.NewGuid().ToString("N");
-            var exportDirectory = EnsureDebtExportHistoryDirectory(customer.Id, exportNow, out var relativeDirectory);
-            var storedFileName = BuildStoredFileName(fileName, exportHistoryId);
-            var absolutePath = Path.Combine(exportDirectory, storedFileName);
-            await System.IO.File.WriteAllBytesAsync(absolutePath, fileBytes);
-
-            var exportHistory = new CustomerDebtExportHistory
+            try
             {
-                id = exportHistoryId,
-                customerId = customer.Id,
-                customerCode = NormalizeText(customer.code),
-                customerName = NormalizeText(customer.name),
-                fileName = fileName,
-                storedFileName = storedFileName,
-                relativePath = BuildDebtExportHistoryRelativePath(relativeDirectory, storedFileName),
-                contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                size = fileBytes.LongLength,
-                periodFrom = transactions.Count == 0 ? (DateTime?)null : transactions.Min(x => x.transactionAt),
-                periodTo = transactions.Count == 0 ? (DateTime?)null : transactions.Max(x => x.transactionAt),
-                transactionCount = transactions.Count,
-                exportedAt = exportedAt,
-                exportedBy = actor,
-            };
-            await _apiDocumentDbContext.CustomerDebtExportHistories.InsertOneAsync(exportHistory);
+                MarkDebtExportProgress(progressRequestId, customerId, "excel", 15, "processing", "Loading customer profile");
+                await MigrateLegacyDataForCustomerAsync(customer, true);
+                MarkDebtExportProgress(progressRequestId, customerId, "excel", 28, "processing", "Migrating legacy data");
 
-            return File(
-                fileBytes,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                fileName);
+                List<CustomerDebtTransaction> transactions;
+                var requestedIds = (transactionIds ?? string.Empty)
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                if (requestedIds.Count > 0)
+                {
+                    var allTransactions = await _apiDocumentDbContext.CustomerDebtTransactions
+                        .Find(x => x.customerId == customerId && !x.isDeleted)
+                        .SortBy(x => x.transactionAt)
+                        .ToListAsync();
+                    transactions = allTransactions
+                        .Where(t => requestedIds.Contains(t.id ?? string.Empty))
+                        .ToList();
+                }
+                else
+                {
+                    transactions = await _apiDocumentDbContext.CustomerDebtTransactions
+                        .Find(x => x.customerId == customerId && !x.isDeleted)
+                        .SortBy(x => x.transactionAt)
+                        .ToListAsync();
+                }
+
+                MarkDebtExportProgress(progressRequestId, customerId, "excel", 46, "processing", "Loading transaction ledger");
+
+                MarkDebtExportProgress(progressRequestId, customerId, "excel", 62, "processing", "Rendering Excel file");
+                var fileBytes = await BuildDebtCustomerExcelFileAsync(customer, transactions);
+                var safeCode = string.IsNullOrWhiteSpace(customer.code)
+                    ? "khach-hang"
+                    : string.Join("-", customer.code.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
+                var exportNow = ConvertToDisplayTime(DateTime.UtcNow);
+                var fileName = $"so-chi-tiet-cong-no-{safeCode}-{exportNow:yyyyMMddHHmmss}.xlsx";
+                var actor = GetCurrentActor();
+                var exportedAt = DateTime.UtcNow;
+                var exportHistoryId = Guid.NewGuid().ToString("N");
+                var exportDirectory = EnsureDebtExportHistoryDirectory(customer.Id, exportNow, out var relativeDirectory);
+                var storedFileName = BuildStoredFileName(fileName, exportHistoryId);
+                var absolutePath = Path.Combine(exportDirectory, storedFileName);
+
+                MarkDebtExportProgress(progressRequestId, customerId, "excel", 80, "processing", "Saving exported file");
+                await System.IO.File.WriteAllBytesAsync(absolutePath, fileBytes);
+
+                var exportHistory = new CustomerDebtExportHistory
+                {
+                    id = exportHistoryId,
+                    customerId = customer.Id,
+                    customerCode = NormalizeText(customer.code),
+                    customerName = NormalizeText(customer.name),
+                    fileName = fileName,
+                    storedFileName = storedFileName,
+                    relativePath = BuildDebtExportHistoryRelativePath(relativeDirectory, storedFileName),
+                    contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    size = fileBytes.LongLength,
+                    periodFrom = transactions.Count == 0 ? (DateTime?)null : transactions.Min(x => x.transactionAt),
+                    periodTo = transactions.Count == 0 ? (DateTime?)null : transactions.Max(x => x.transactionAt),
+                    transactionCount = transactions.Count,
+                    exportedAt = exportedAt,
+                    exportedBy = actor,
+                };
+
+                MarkDebtExportProgress(progressRequestId, customerId, "excel", 92, "processing", "Writing export history");
+                await _apiDocumentDbContext.CustomerDebtExportHistories.InsertOneAsync(exportHistory);
+                MarkDebtExportProgress(progressRequestId, customerId, "excel", 100, "completed", "Excel export completed", fileName);
+
+                return File(
+                    fileBytes,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    fileName);
+            }
+            catch (Exception)
+            {
+                MarkDebtExportProgress(progressRequestId, customerId, "excel", 100, "failed", "Excel export failed");
+                throw;
+            }
         }
 
         [HttpGet("customers/{customerId}/export-pdf")]
         public async Task<IActionResult> ExportDebtCustomerPdfAsync(
             string customerId,
-            [FromQuery] string transactionIds = null)
+            [FromQuery] string transactionIds = null,
+            [FromQuery] string exportRequestId = null)
         {
             if (string.IsNullOrWhiteSpace(customerId))
             {
                 return BadRequest("Invalid customerId");
             }
 
+            var progressRequestId = EnsureExportRequestId(exportRequestId);
+            MarkDebtExportProgress(progressRequestId, customerId, "pdf", 5, "processing", "Preparing export data");
+
             var filter = Builders<CustomerAccount>.Filter.Eq(x => x.Id, customerId);
             var customer = await _apiDocumentDbContext.CustomerAccounts.Find(filter).FirstOrDefaultAsync();
             if (customer == null || customer.isDeleted)
             {
+                MarkDebtExportProgress(progressRequestId, customerId, "pdf", 100, "failed", "Customer not found");
                 return NotFound("Customer not found");
             }
 
-            await MigrateLegacyDataForCustomerAsync(customer, true);
-
-            List<CustomerDebtTransaction> transactions;
-            var requestedIds = (transactionIds ?? string.Empty)
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            if (requestedIds.Count > 0)
+            try
             {
-                var allTransactions = await _apiDocumentDbContext.CustomerDebtTransactions
-                    .Find(x => x.customerId == customerId)
-                    .SortBy(x => x.transactionAt)
-                    .ToListAsync();
-                transactions = allTransactions
-                    .Where(t => requestedIds.Contains(t.id ?? string.Empty))
-                    .ToList();
+                MarkDebtExportProgress(progressRequestId, customerId, "pdf", 15, "processing", "Loading customer profile");
+                await MigrateLegacyDataForCustomerAsync(customer, true);
+                MarkDebtExportProgress(progressRequestId, customerId, "pdf", 28, "processing", "Migrating legacy data");
+
+                List<CustomerDebtTransaction> transactions;
+                var requestedIds = (transactionIds ?? string.Empty)
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                if (requestedIds.Count > 0)
+                {
+                    var allTransactions = await _apiDocumentDbContext.CustomerDebtTransactions
+                        .Find(x => x.customerId == customerId)
+                        .SortBy(x => x.transactionAt)
+                        .ToListAsync();
+                    transactions = allTransactions
+                        .Where(t => requestedIds.Contains(t.id ?? string.Empty))
+                        .ToList();
+                }
+                else
+                {
+                    transactions = await _apiDocumentDbContext.CustomerDebtTransactions
+                        .Find(x => x.customerId == customerId)
+                        .SortBy(x => x.transactionAt)
+                        .ToListAsync();
+                }
+
+                MarkDebtExportProgress(progressRequestId, customerId, "pdf", 46, "processing", "Loading transaction ledger");
+
+                MarkDebtExportProgress(progressRequestId, customerId, "pdf", 62, "processing", "Rendering PDF file");
+                var fileBytes = await BuildDebtCustomerPdfFileAsync(customer, transactions);
+                var safeCode = string.IsNullOrWhiteSpace(customer.code)
+                    ? "khach-hang"
+                    : string.Join("-", customer.code.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
+                var exportNow = ConvertToDisplayTime(DateTime.UtcNow);
+                var fileName = $"so-chi-tiet-cong-no-{safeCode}-{exportNow:yyyyMMddHHmmss}.pdf";
+                var actor = GetCurrentActor();
+                var exportedAt = DateTime.UtcNow;
+                var exportHistoryId = Guid.NewGuid().ToString("N");
+                var exportDirectory = EnsureDebtExportHistoryDirectory(customer.Id, exportNow, out var relativeDirectory);
+                var storedFileName = BuildStoredFileName(fileName, exportHistoryId);
+                var absolutePath = Path.Combine(exportDirectory, storedFileName);
+
+                MarkDebtExportProgress(progressRequestId, customerId, "pdf", 80, "processing", "Saving exported file");
+                await System.IO.File.WriteAllBytesAsync(absolutePath, fileBytes);
+
+                var exportHistory = new CustomerDebtExportHistory
+                {
+                    id = exportHistoryId,
+                    customerId = customer.Id,
+                    customerCode = NormalizeText(customer.code),
+                    customerName = NormalizeText(customer.name),
+                    fileName = fileName,
+                    storedFileName = storedFileName,
+                    relativePath = BuildDebtExportHistoryRelativePath(relativeDirectory, storedFileName),
+                    contentType = "application/pdf",
+                    size = fileBytes.LongLength,
+                    periodFrom = transactions.Count == 0 ? (DateTime?)null : transactions.Min(x => x.transactionAt),
+                    periodTo = transactions.Count == 0 ? (DateTime?)null : transactions.Max(x => x.transactionAt),
+                    transactionCount = transactions.Count,
+                    exportedAt = exportedAt,
+                    exportedBy = actor,
+                };
+
+                MarkDebtExportProgress(progressRequestId, customerId, "pdf", 92, "processing", "Writing export history");
+                await _apiDocumentDbContext.CustomerDebtExportHistories.InsertOneAsync(exportHistory);
+                MarkDebtExportProgress(progressRequestId, customerId, "pdf", 100, "completed", "PDF export completed", fileName);
+
+                return File(fileBytes, "application/pdf", fileName);
             }
-            else
+            catch (Exception)
             {
-                transactions = await _apiDocumentDbContext.CustomerDebtTransactions
-                    .Find(x => x.customerId == customerId)
-                    .SortBy(x => x.transactionAt)
-                    .ToListAsync();
+                MarkDebtExportProgress(progressRequestId, customerId, "pdf", 100, "failed", "PDF export failed");
+                throw;
+            }
+        }
+
+        [HttpGet("customers/{customerId}/export-progress/{requestId}")]
+        public IActionResult GetDebtCustomerExportProgressAsync(string customerId, string requestId)
+        {
+            var normalizedCustomerId = (customerId ?? string.Empty).Trim();
+            var normalizedRequestId = (requestId ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalizedCustomerId) || string.IsNullOrWhiteSpace(normalizedRequestId))
+            {
+                return BadRequest("Invalid request");
             }
 
-            var fileBytes = await BuildDebtCustomerPdfFileAsync(customer, transactions);
-            var safeCode = string.IsNullOrWhiteSpace(customer.code)
-                ? "khach-hang"
-                : string.Join("-", customer.code.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
-            var exportNow = ConvertToDisplayTime(DateTime.UtcNow);
-            var fileName = $"so-chi-tiet-cong-no-{safeCode}-{exportNow:yyyyMMddHHmmss}.pdf";
+            CleanupExpiredExportProgressEntries();
 
-            return File(fileBytes, "application/pdf", fileName);
+            if (!DebtExportProgressMap.TryGetValue(normalizedRequestId, out var progress)
+                || progress == null
+                || !string.Equals(progress.CustomerId, normalizedCustomerId, StringComparison.OrdinalIgnoreCase))
+            {
+                return NotFound("Export progress not found");
+            }
+
+            return Ok(new
+            {
+                requestId = normalizedRequestId,
+                customerId = progress.CustomerId,
+                mode = progress.Mode,
+                status = progress.Status,
+                progressPercent = progress.ProgressPercent,
+                message = progress.Message,
+                fileName = progress.FileName,
+                updatedAt = progress.UpdatedAt,
+            });
         }
 
         [HttpGet("customers/{customerId}/export-excel-history")]
@@ -1159,6 +1290,78 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             }
 
             return user.Id ?? "system";
+        }
+
+        private static string EnsureExportRequestId(string exportRequestId)
+        {
+            var normalized = (exportRequestId ?? string.Empty).Trim();
+            return string.IsNullOrWhiteSpace(normalized) ? Guid.NewGuid().ToString("N") : normalized;
+        }
+
+        private static void MarkDebtExportProgress(
+            string requestId,
+            string customerId,
+            string mode,
+            int progressPercent,
+            string status,
+            string message,
+            string fileName = null)
+        {
+            if (string.IsNullOrWhiteSpace(requestId))
+            {
+                return;
+            }
+
+            var normalizedRequestId = requestId.Trim();
+            var now = DateTime.UtcNow;
+            DebtExportProgressMap.AddOrUpdate(
+                normalizedRequestId,
+                _ => new DebtExportProgressState
+                {
+                    RequestId = normalizedRequestId,
+                    CustomerId = (customerId ?? string.Empty).Trim(),
+                    Mode = (mode ?? string.Empty).Trim().ToLowerInvariant(),
+                    Status = (status ?? "processing").Trim().ToLowerInvariant(),
+                    ProgressPercent = Math.Max(0, Math.Min(100, progressPercent)),
+                    Message = message,
+                    FileName = fileName,
+                    UpdatedAt = now,
+                },
+                (_, current) =>
+                {
+                    current.CustomerId = (customerId ?? string.Empty).Trim();
+                    current.Mode = (mode ?? string.Empty).Trim().ToLowerInvariant();
+                    current.Status = (status ?? "processing").Trim().ToLowerInvariant();
+                    current.ProgressPercent = Math.Max(0, Math.Min(100, progressPercent));
+                    current.Message = message;
+                    current.FileName = string.IsNullOrWhiteSpace(fileName) ? current.FileName : fileName;
+                    current.UpdatedAt = now;
+                    return current;
+                });
+        }
+
+        private static void CleanupExpiredExportProgressEntries()
+        {
+            var cutoff = DateTime.UtcNow - DebtExportProgressTtl;
+            foreach (var item in DebtExportProgressMap)
+            {
+                if (item.Value == null || item.Value.UpdatedAt < cutoff)
+                {
+                    DebtExportProgressMap.TryRemove(item.Key, out _);
+                }
+            }
+        }
+
+        private sealed class DebtExportProgressState
+        {
+            public string RequestId { get; set; }
+            public string CustomerId { get; set; }
+            public string Mode { get; set; }
+            public string Status { get; set; }
+            public int ProgressPercent { get; set; }
+            public string Message { get; set; }
+            public string FileName { get; set; }
+            public DateTime UpdatedAt { get; set; }
         }
 
         private CustomerAuditLogEntry CreateAuditLogEntry(
@@ -1802,10 +2005,16 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             var htmlConverter = new HtmlToPdfConverter(HtmlRenderingEngine.Blink);
             var settings = new BlinkConverterSettings
             {
-                Orientation = PdfPageOrientation.Landscape,
+                Orientation = PdfPageOrientation.Portrait,
                 PdfPageSize = PdfPageSize.A4
             };
             settings.Margin.All = 18;
+            settings.ConversionTimeout = 30000;
+            var blinkPath = EnsureBlinkRuntimePath();
+            if (!string.IsNullOrWhiteSpace(blinkPath))
+            {
+                settings.BlinkPath = blinkPath;
+            }
             htmlConverter.ConverterSettings = settings;
 
             using (var document = htmlConverter.Convert(html, string.Empty))
@@ -1814,6 +2023,97 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 document.Save(stream);
                 return stream.ToArray();
             }
+        }
+
+        private string EnsureBlinkRuntimePath()
+        {
+            var runtimeId = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+                ? "osx"
+                : RuntimeInformation.IsOSPlatform(OSPlatform.Linux)
+                    ? "linux"
+                    : RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+                        ? "win"
+                        : string.Empty;
+
+            if (string.IsNullOrWhiteSpace(runtimeId))
+            {
+                return null;
+            }
+
+            var nativePath = Path.Combine(AppContext.BaseDirectory, "runtimes", runtimeId, "native");
+            if (!Directory.Exists(nativePath))
+            {
+                return null;
+            }
+
+            if (!IsBlinkRuntimeReady(nativePath, runtimeId))
+            {
+                lock (BlinkRuntimeLock)
+                {
+                    if (!IsBlinkRuntimeReady(nativePath, runtimeId))
+                    {
+                        foreach (var zipPath in Directory.GetFiles(nativePath, "*.zip", SearchOption.TopDirectoryOnly))
+                        {
+                            try
+                            {
+                                ZipFile.ExtractToDirectory(zipPath, nativePath, true);
+                            }
+                            catch
+                            {
+                                // Ignore extraction failures to preserve previous successful extraction state.
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                var chromiumExecutable = Path.Combine(nativePath, "Chromium.app", "Contents", "MacOS", "Chromium");
+                if (System.IO.File.Exists(chromiumExecutable))
+                {
+                    try
+                    {
+                        System.IO.File.SetUnixFileMode(
+                            chromiumExecutable,
+                            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                            | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                            | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+                    }
+                    catch
+                    {
+                        // Ignore permission failures; converter may still work with existing mode.
+                    }
+                }
+            }
+
+            return nativePath;
+        }
+
+        private bool IsBlinkRuntimeReady(string nativePath, string runtimeId)
+        {
+            if (string.IsNullOrWhiteSpace(nativePath) || string.IsNullOrWhiteSpace(runtimeId))
+            {
+                return false;
+            }
+
+            if (runtimeId == "osx")
+            {
+                var chromiumExecutable = Path.Combine(nativePath, "Chromium.app", "Contents", "MacOS", "Chromium");
+                return System.IO.File.Exists(chromiumExecutable);
+            }
+
+            if (runtimeId == "linux")
+            {
+                return Directory.Exists(Path.Combine(nativePath, "chrome-linux"));
+            }
+
+            if (runtimeId == "win")
+            {
+                return Directory.Exists(Path.Combine(nativePath, "chrome-win"));
+            }
+
+            return false;
         }
 
         private string BuildDebtCustomerPdfHtml(
@@ -1857,6 +2157,13 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             builder.AppendLine(".opening .label, .totals .label, .closing .label { text-align: center; }");
             builder.AppendLine(".placeholder td { height: 22px; }");
             builder.AppendLine(".muted { color: #666; }");
+            builder.AppendLine(".ledger-footer { margin-top: 10px; }");
+            builder.AppendLine(".footer-date { text-align: right; font-style: italic; margin: 8px 0 16px; padding-right: 20px; }");
+            builder.AppendLine(".footer-sign { width: 100%; border-collapse: collapse; table-layout: fixed; }");
+            builder.AppendLine(".footer-sign td { border: none; text-align: center; vertical-align: top; padding: 4px 8px; }");
+            builder.AppendLine(".footer-sign .title { font-weight: 700; }");
+            builder.AppendLine(".footer-sign .note { margin-top: 8px; }");
+            builder.AppendLine(".footer-sign .spacer { height: 34px; }");
             builder.AppendLine("</style>");
             builder.AppendLine("</head>");
             builder.AppendLine("<body>");
@@ -1965,6 +2272,17 @@ namespace B2BAdmin.ApiDocument.API.Controllers
 
             builder.AppendLine("</tbody>");
             builder.AppendLine("</table>");
+
+            var footerNow = ConvertToDisplayTime(DateTime.UtcNow);
+            builder.AppendLine("<div class='ledger-footer'>");
+            builder.AppendLine($"<div class='footer-date'>HCM, Ngày {footerNow:dd} tháng {footerNow:MM} năm {footerNow:yyyy}</div>");
+            builder.AppendLine("<table class='footer-sign'>");
+            builder.AppendLine("<tr><td class='title'>Kế toán trưởng</td><td class='title'>Giám Đốc</td></tr>");
+            builder.AppendLine("<tr><td class='note'>(Ký, họ tên)</td><td class='note'>(Ký, họ tên)</td></tr>");
+            builder.AppendLine("<tr><td class='spacer'></td><td class='spacer'></td></tr>");
+            builder.AppendLine("</table>");
+            builder.AppendLine("</div>");
+
             builder.AppendLine("</body>");
             builder.AppendLine("</html>");
             return builder.ToString();
