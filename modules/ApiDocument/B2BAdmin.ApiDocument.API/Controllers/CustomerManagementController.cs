@@ -1991,7 +1991,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             worksheet.Cells[7, 1].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
 
             worksheet.Cells[8, 2, 8, 6].Merge = true;
-            worksheet.Cells[8, 2].Value = "CÔNG TY TNHH TM XNK VUI PHAT";
+            worksheet.Cells[8, 2].Value = customer.name ?? string.Empty;
             worksheet.Cells[8, 2].Style.Font.Bold = true;
             worksheet.Cells[8, 2].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
 
