@@ -630,6 +630,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
             page = page < 1 ? 1 : page;
             pageSize = pageSize < 1 ? 20 : Math.Min(pageSize, 200);
 
+            // Validate customer exists if specified
             if (!string.IsNullOrWhiteSpace(customerId))
             {
                 var customerExists = await _apiDocumentDbContext.CustomerAccounts
@@ -649,83 +650,104 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 }
             }
 
+            // Build database filters - DO NOT load all data into memory
             var transactionFilterBuilder = Builders<CustomerDebtTransaction>.Filter;
-            var transactionFilter = !string.IsNullOrWhiteSpace(customerId)
-                ? transactionFilterBuilder.Eq(x => x.customerId, customerId)
-                : transactionFilterBuilder.Empty;
+            var filterList = new List<FilterDefinition<CustomerDebtTransaction>>
+            {
+                transactionFilterBuilder.Eq(x => x.isDeleted, false)
+            };
 
+            if (!string.IsNullOrWhiteSpace(customerId))
+            {
+                filterList.Add(transactionFilterBuilder.Eq(x => x.customerId, customerId));
+            }
+
+            if (!string.IsNullOrWhiteSpace(transactionType) && !string.Equals(transactionType, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                filterList.Add(transactionFilterBuilder.Eq(x => x.transactionType, transactionType.ToLowerInvariant()));
+            }
+
+            var combinedFilter = transactionFilterBuilder.And(filterList);
+
+            // Apply search filter if provided (case-insensitive text search on contractCode and note)
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var searchKeyword = search.Trim().ToLowerInvariant();
+                var searchFilter = transactionFilterBuilder.Or(
+                    transactionFilterBuilder.Regex(x => x.contractCode, new BsonRegularExpression(searchKeyword, "i")),
+                    transactionFilterBuilder.Regex(x => x.note, new BsonRegularExpression(searchKeyword, "i"))
+                );
+                combinedFilter = transactionFilterBuilder.And(combinedFilter, searchFilter);
+            }
+
+            // Get total count first (only count, don't load data)
+            var totalItems = await _apiDocumentDbContext.CustomerDebtTransactions
+                .CountDocumentsAsync(combinedFilter);
+
+            if (totalItems == 0)
+            {
+                return Ok(new
+                {
+                    page,
+                    pageSize,
+                    totalItems = 0,
+                    totalPages = 0,
+                    items = new List<DebtTransactionListItem>()
+                });
+            }
+
+            // Define sort order at database level
+            var sortDefinition = sortBy.ToLowerInvariant() switch
+            {
+                "customername" => sortDirection.ToLowerInvariant() == "asc"
+                    ? Builders<CustomerDebtTransaction>.Sort.Ascending(x => x.customerId)
+                    : Builders<CustomerDebtTransaction>.Sort.Descending(x => x.customerId),
+                "contractcode" => sortDirection.ToLowerInvariant() == "asc"
+                    ? Builders<CustomerDebtTransaction>.Sort.Ascending(x => x.contractCode)
+                    : Builders<CustomerDebtTransaction>.Sort.Descending(x => x.contractCode),
+                "amount" => sortDirection.ToLowerInvariant() == "asc"
+                    ? Builders<CustomerDebtTransaction>.Sort.Ascending(x => x.amount)
+                    : Builders<CustomerDebtTransaction>.Sort.Descending(x => x.amount),
+                _ => sortDirection.ToLowerInvariant() == "asc"
+                    ? Builders<CustomerDebtTransaction>.Sort.Ascending(x => x.transactionAt)
+                    : Builders<CustomerDebtTransaction>.Sort.Descending(x => x.transactionAt),
+            };
+
+            // Fetch only the page we need with server-side sorting
+            var skip = (page - 1) * pageSize;
             var transactionDocs = await _apiDocumentDbContext.CustomerDebtTransactions
-                .Find(transactionFilterBuilder.And(transactionFilter, transactionFilterBuilder.Eq(x => x.isDeleted, false)))
+                .Find(combinedFilter)
+                .Sort(sortDefinition)
+                .Skip(skip)
+                .Limit(pageSize)
                 .ToListAsync();
 
+            // Get only the customer IDs we need for the current page
             var transactionCustomerIds = transactionDocs
                 .Select(x => x.customerId)
                 .Where(x => !string.IsNullOrWhiteSpace(x))
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
+
+            // Load only the customers for current page (not all)
             var customers = transactionCustomerIds.Count == 0
                 ? new List<CustomerAccount>()
                 : await _apiDocumentDbContext.CustomerAccounts
                     .Find(x => transactionCustomerIds.Contains(x.Id) && !x.isDeleted)
+                    .Project(x => new CustomerAccount
+                    {
+                        Id = x.Id,
+                        code = x.code,
+                        name = x.name
+                    })
                     .ToListAsync();
+
             var customerLookup = customers
                 .Where(x => !string.IsNullOrWhiteSpace(x.Id))
                 .ToDictionary(x => x.Id, x => x);
 
-            var transactionIdSet = new HashSet<string>(
-                transactionDocs
-                    .Where(x => !string.IsNullOrWhiteSpace(x.id))
-                    .Select(x => x.id),
-                StringComparer.Ordinal);
-            var legacyCustomerFilter = !string.IsNullOrWhiteSpace(customerId)
-                ? Builders<CustomerAccount>.Filter.And(
-                    Builders<CustomerAccount>.Filter.Eq(x => x.Id, customerId),
-                    Builders<CustomerAccount>.Filter.Eq(x => x.isDeleted, false))
-                : Builders<CustomerAccount>.Filter.And(
-                    Builders<CustomerAccount>.Filter.SizeGt(x => x.debtTransactions, 0),
-                    Builders<CustomerAccount>.Filter.Eq(x => x.isDeleted, false));
-            var legacyCustomers = await _apiDocumentDbContext.CustomerAccounts
-                .Find(legacyCustomerFilter)
-                .Project(x => new CustomerAccount
-                {
-                    Id = x.Id,
-                    code = x.code,
-                    name = x.name,
-                    debtTransactions = x.debtTransactions
-                })
-                .ToListAsync();
-
-            var legacyTransactionDocs = legacyCustomers
-                .Where(c => c.debtTransactions != null)
-                .SelectMany(c => c.debtTransactions
-                    .Where(t => !string.IsNullOrWhiteSpace(t.id) && !transactionIdSet.Contains(t.id))
-                    .Select(t => new CustomerDebtTransaction
-                    {
-                        id = t.id,
-                        customerId = c.Id,
-                            accountType = t.accountType,
-                        transactionType = t.transactionType,
-                        amount = t.amount,
-                        transactionAt = t.transactionAt,
-                        note = t.note,
-                        createdAt = t.createdAt,
-                        createdBy = t.createdBy,
-                    }))
-                .ToList();
-
-            transactionDocs.AddRange(legacyTransactionDocs);
-
-            foreach (var legacyCustomer in legacyCustomers)
-            {
-                if (string.IsNullOrWhiteSpace(legacyCustomer.Id) || customerLookup.ContainsKey(legacyCustomer.Id))
-                {
-                    continue;
-                }
-
-                customerLookup[legacyCustomer.Id] = legacyCustomer;
-            }
-
-            var transactions = transactionDocs
+            // Map to response DTOs
+            var items = transactionDocs
                 .Select(t =>
                 {
                     customerLookup.TryGetValue(t.customerId ?? string.Empty, out var customer);
@@ -746,34 +768,6 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                         createdBy = t.createdBy,
                     };
                 })
-                .ToList();
-
-            if (!string.IsNullOrWhiteSpace(search))
-            {
-                var keyword = search.Trim();
-                transactions = transactions
-                    .Where(x =>
-                        ContainsText(x.customerCode, keyword)
-                        || ContainsText(x.customerName, keyword)
-                        || ContainsText(x.contractCode, keyword)
-                        || ContainsText(x.note, keyword)
-                        || ContainsText(x.createdBy, keyword))
-                    .ToList();
-            }
-
-            if (!string.IsNullOrWhiteSpace(transactionType) && !string.Equals(transactionType, "all", StringComparison.OrdinalIgnoreCase))
-            {
-                transactions = transactions
-                    .Where(x => string.Equals(x.transactionType, transactionType, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-            }
-
-            transactions = SortDebtTransactions(transactions, sortBy, sortDirection);
-
-            var totalItems = transactions.Count;
-            var items = transactions
-                .Skip((page - 1) * pageSize)
-                .Take(pageSize)
                 .ToList();
 
             return Ok(new
