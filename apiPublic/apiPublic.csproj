@@ -9,7 +9,7 @@
     <PackageReference Include="EPPlus" Version="5.1.2" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc" Version="2.2.0" />
     <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="3.1.22" />
-    <PackageReference Include="Syncfusion.Licensing" Version="19.4.0.54" />
+    <PackageReference Include="Syncfusion.Licensing" Version="33.2.5" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="6.24.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="3.1.25" />
     <PackageReference Include="Spire.PDF" Version="9.4.0" />
