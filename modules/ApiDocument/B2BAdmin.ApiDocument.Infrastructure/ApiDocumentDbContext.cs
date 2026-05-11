@@ -17,7 +17,7 @@ namespace B2BAdmin.ApiDocument.Infrastructure
 {
     public class ApiDocumentDbContext : MongoDbBaseContext
     {
-        public ApiDocumentDbContext(IOptionsMonitor<MongoDatabaseSettings> settings, ILoggerFactory logger) : base(settings, logger)
+        public ApiDocumentDbContext(IOptionsMonitor<CloudKit.Infrastructure.Data.MongoDb.MongoDatabaseSettings> settings, ILoggerFactory logger) : base(settings, logger)
         {
             var pack = new ConventionPack();
             pack.Add(new CamelCaseElementNameConvention());

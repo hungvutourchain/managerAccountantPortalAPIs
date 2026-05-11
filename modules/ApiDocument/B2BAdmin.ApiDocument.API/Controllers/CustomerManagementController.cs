@@ -313,7 +313,7 @@ namespace B2BAdmin.ApiDocument.API.Controllers
                 }
 
                 var matchingCustomerIds = await _apiDocumentDbContext.CustomerDebtTransactions
-                    .Distinct<string>(x => x.customerId, transactionFilterBuilder.And(transactionFilters))
+                    .Distinct<string>("customerId", transactionFilterBuilder.And(transactionFilters))
                     .ToListAsync();
 
                 var distinctCustomerIds = matchingCustomerIds
