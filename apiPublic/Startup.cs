@@ -27,7 +27,7 @@ namespace ApiPlugin
         public Startup(IConfiguration configuration)
         {
             //Register Syncfusion license
-            Syncfusion.Licensing.SyncfusionLicenseProvider.RegisterLicense("NTkzOTM2QDMxMzkyZTM0MmUzMFltOTZTSnZURjNDcEFFbkVlN1VRUldNVFV5MEdqaEtEZzhMWXFCQklBRE09");
+            Syncfusion.Licensing.SyncfusionLicenseProvider.RegisterLicense("Ngo9BigBOggjHTQxAR8/V1JHaF5cWWdCf1FpRmJGdld5fUVHYVZUTXxaS00DNHVRdkdlWXpfcXRRRGJfUUJ2VkpWYEo=");
             Configuration = configuration;
             
         }

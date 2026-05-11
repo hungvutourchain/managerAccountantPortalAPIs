@@ -14,7 +14,9 @@ namespace ApiPlugin
     public class Program
     {
         public static void Main(string[] args)
-        {            CreateHostBuilder(args).Build().Run();
+        {
+            Syncfusion.Licensing.SyncfusionLicenseProvider.RegisterLicense("Ngo9BigBOggjHTQxAR8/V1JHaF5cWWdCf1FpRmJGdld5fUVHYVZUTXxaS00DNHVRdkdlWXpfcXRRRGJfUUJ2VkpWYEo=");
+            CreateHostBuilder(args).Build().Run();
         }
         public static IHostBuilder CreateHostBuilder(string[] args)
         {
